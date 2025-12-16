@@ -1,0 +1,39 @@
+# Binaries
+*.o
+*.a
+*.so
+*.exe
+*.out
+*.test
+
+# eBPF compiled objects
+*.bpf.o
+*.bpf.c.o
+vmlinux.h
+
+# Go
+vendor/
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# macOS
+.DS_Store
+
+# Build output
+build/
+dist/
+bin/
+
+# Test coverage
+coverage.out
+*.coverprofile
+
+# Temporary files
+*.tmp
+tmp/
