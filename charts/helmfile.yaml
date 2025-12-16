@@ -1,0 +1,182 @@
+repositories:
+  - name: cilium
+    url: https://helm.cilium.io/
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+  - name: grafana
+    url: https://grafana.github.io/helm-charts
+
+releases:
+  # Cilium CNI - replaces Flannel
+  - name: cilium
+    namespace: kube-system
+    chart: cilium/cilium
+    version: 1.15.0
+    values:
+      - # Enable Hubble for observability
+        hubble:
+          enabled: true
+          relay:
+            enabled: true
+          ui:
+            enabled: true
+            service:
+              type: LoadBalancer
+          metrics:
+            enabled:
+              - dns
+              - drop
+              - tcp
+              - flow
+              - port-distribution
+              - icmp
+              - httpV2
+
+        # Enable Prometheus metrics
+        prometheus:
+          enabled: true
+          serviceMonitor:
+            enabled: true
+
+        # Operator configuration
+        operator:
+          prometheus:
+            enabled: true
+
+        # Enable eBPF-based kube-proxy replacement
+        kubeProxyReplacement: true
+
+        # Enable eBPF masquerading (for NAT)
+        bpf:
+          masquerade: true
+
+        # Enable bandwidth manager (for QoS)
+        bandwidthManager:
+          enabled: true
+
+        # Enable local redirect policy (for local service access)
+        localRedirectPolicy: true
+
+  # Prometheus for metrics collection
+  - name: prometheus
+    namespace: monitoring
+    chart: prometheus-community/prometheus
+    version: 25.11.1
+    values:
+      - alertmanager:
+          enabled: false  # Disable for POC
+
+        server:
+          persistentVolume:
+            enabled: false  # No persistence for local dev
+
+          service:
+            type: LoadBalancer
+            servicePort: 9090
+
+        # Scrape Cilium and Hubble metrics
+        serverFiles:
+          prometheus.yml:
+            scrape_configs:
+              - job_name: prometheus
+                static_configs:
+                  - targets:
+                    - localhost:9090
+
+              - job_name: kubernetes-apiservers
+                kubernetes_sd_configs:
+                  - role: endpoints
+                scheme: https
+                tls_config:
+                  ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+                    action: keep
+                    regex: default;kubernetes;https
+
+              - job_name: cilium-agent
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names:
+                        - kube-system
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+                    action: keep
+                    regex: cilium-agent
+                  - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+                    action: replace
+                    regex: ([^:]+)(?::\d+)?;(\d+)
+                    replacement: $1:$2
+                    target_label: __address__
+
+              - job_name: hubble
+                kubernetes_sd_configs:
+                  - role: pod
+                    namespaces:
+                      names:
+                        - kube-system
+                relabel_configs:
+                  - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+                    action: keep
+                    regex: hubble-relay
+                  - source_labels: [__address__]
+                    action: replace
+                    regex: ([^:]+)(?::\d+)?
+                    replacement: $1:9965
+                    target_label: __address__
+
+  # Grafana for dashboards
+  - name: grafana
+    namespace: monitoring
+    chart: grafana/grafana
+    version: 7.3.0
+    values:
+      - adminPassword: admin  # Change for production!
+
+        service:
+          type: LoadBalancer
+          port: 3000
+
+        persistence:
+          enabled: false  # No persistence for local dev
+
+        datasources:
+          datasources.yaml:
+            apiVersion: 1
+            datasources:
+              - name: Prometheus
+                type: prometheus
+                url: http://prometheus-server.monitoring.svc.cluster.local
+                access: proxy
+                isDefault: true
+
+        dashboardProviders:
+          dashboardproviders.yaml:
+            apiVersion: 1
+            providers:
+              - name: 'default'
+                orgId: 1
+                folder: ''
+                type: file
+                disableDeletion: false
+                editable: true
+                options:
+                  path: /var/lib/grafana/dashboards/default
+
+        # Pre-load Cilium dashboards
+        dashboards:
+          default:
+            cilium-operator:
+              gnetId: 16611
+              revision: 1
+              datasource: Prometheus
+            cilium-agent:
+              gnetId: 16612
+              revision: 1
+              datasource: Prometheus
+            hubble:
+              gnetId: 16613
+              revision: 1
+              datasource: Prometheus

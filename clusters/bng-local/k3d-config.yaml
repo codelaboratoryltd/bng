@@ -1,0 +1,48 @@
+---
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: bng
+servers: 1
+agents: 2
+image: rancher/k3s:v1.28.5-k3s1  # Specify k3s version for consistency
+ports:
+  # HTTP/HTTPS for services
+  - port: 80:80
+    nodeFilters:
+      - loadbalancer
+  - port: 443:443
+    nodeFilters:
+      - loadbalancer
+  # DHCP ports (for BNG)
+  - port: 6767:67/udp
+    nodeFilters:
+      - server:*
+  - port: 6768:68/udp
+    nodeFilters:
+      - server:*
+options:
+  k3s:
+    extraArgs:
+      # Disable Flannel CNI (we'll use Cilium)
+      - arg: --flannel-backend=none
+        nodeFilters:
+          - server:*
+      # Disable Traefik (we may install it via Helm later)
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+      # Disable servicelb (we'll use Cilium's LoadBalancer)
+      - arg: --disable=servicelb
+        nodeFilters:
+          - server:*
+  k3d:
+    wait: true
+    timeout: "120s"
+registries:
+  create:
+    name: k3d-bng-registry
+    host: 0.0.0.0
+    hostPort: "5555"
+    volumes:
+      - /tmp/k3d-bng-registry:/var/lib/registry  # Persist registry data
