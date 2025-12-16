@@ -1,0 +1,40 @@
+# eBPF Build Environment
+# Multi-stage build for compiling eBPF programs
+FROM ubuntu:22.04 AS ebpf-builder
+
+# Avoid interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install eBPF build dependencies
+RUN apt-get update && apt-get install -y \
+    # Compiler toolchain
+    clang-14 \
+    llvm-14 \
+    # eBPF libraries
+    libbpf-dev \
+    # Kernel headers for eBPF compilation
+    linux-headers-generic \
+    # BPF tools for debugging
+    linux-tools-common \
+    linux-tools-generic \
+    # Build tools
+    make \
+    pkg-config \
+    # Utilities
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set clang/llvm as default
+RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100 && \
+    update-alternatives --install /usr/bin/llc llc /usr/bin/llc-14 100
+
+# Verify installation
+RUN clang --version && \
+    llc --version && \
+    echo "eBPF build environment ready"
+
+WORKDIR /build
+
+# Default command shows available tools
+CMD ["bash", "-c", "echo 'eBPF Build Environment' && clang --version && llc --version"]

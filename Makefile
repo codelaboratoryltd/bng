@@ -17,10 +17,12 @@ help:
 	@echo "  make hydrate           - Regenerate Helm templates"
 	@echo ""
 	@echo "Build & Test:"
-	@echo "  make build             - Build BNG binary (TODO)"
-	@echo "  make test              - Run Go tests (TODO)"
-	@echo "  make lint              - Run linters (TODO)"
-	@echo "  make build-ebpf        - Build eBPF programs (TODO)"
+	@echo "  make build             - Build BNG binary (includes eBPF)"
+	@echo "  make build-ebpf        - Build eBPF programs only"
+	@echo "  make build-docker      - Build BNG Docker image"
+	@echo "  make test              - Run Go tests"
+	@echo "  make lint              - Run linters"
+	@echo "  make tidy              - Tidy Go modules"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean             - Remove build artifacts"
@@ -67,24 +69,40 @@ hydrate:
 	cd charts && ./hydrate.sh
 
 # -----------------------------------------------------------------------------
-# Build & Test (TODO - Phase 2)
+# Build & Test
 # -----------------------------------------------------------------------------
 
-build:
-	@echo "TODO: Build BNG binary"
-	# go build -o bin/bng ./cmd/bng
+build-ebpf:
+	@echo "Building eBPF programs..."
+	cd bpf && $(MAKE)
+
+build: build-ebpf
+	@echo "Building BNG binary..."
+	go build -o bin/bng ./cmd/bng
+	@echo "✓ Binary built: bin/bng"
+
+build-docker:
+	@echo "Building BNG Docker image..."
+	docker build -t localhost:5555/bng:latest .
+	@echo "✓ Docker image built"
 
 test:
-	@echo "TODO: Run Go tests"
-	# go test ./... -v
+	@echo "Running Go tests..."
+	go test ./... -v
 
 lint:
-	@echo "TODO: Run linters"
-	# golangci-lint run
+	@echo "Running linters..."
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run; \
+	else \
+		echo "golangci-lint not found, skipping"; \
+		echo "Install: brew install golangci-lint"; \
+	fi
 
-build-ebpf:
-	@echo "TODO: Build eBPF programs"
-	# cd bpf && make
+tidy:
+	@echo "Tidying Go modules..."
+	go mod tidy
+	@echo "✓ Go modules tidied"
 
 # -----------------------------------------------------------------------------
 # Cleanup

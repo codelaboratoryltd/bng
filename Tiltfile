@@ -115,26 +115,26 @@ k8s_resource(
 )
 
 # -----------------------------------------------------------------------------
-# BNG Application (TODO - Phase 2)
+# BNG Application
 # -----------------------------------------------------------------------------
 
-# TODO Phase 2: Add docker_build for BNG image
-# docker_build(
-#     'ghcr.io/codelaboratoryltd/bng',
-#     '.',
-#     dockerfile='Dockerfile',
-#     live_update=[
-#         sync('./cmd', '/app/cmd'),
-#         sync('./pkg', '/app/pkg'),
-#         run('go build -o /app/bin/bng ./cmd/bng'),
-#         restart_container(),
-#     ],
-# )
+# Build BNG Docker image with live reload
+docker_build(
+    'localhost:5555/bng',  # Push to local k3d registry
+    '.',
+    dockerfile='Dockerfile',
+    # Note: Live reload disabled for now due to eBPF compilation complexity
+    # Will enable in Phase 3 when we have full eBPF integration
+)
 
-# TODO Phase 2: Add BNG deployment
+# TODO Phase 3: Add BNG Kubernetes deployment
+# - Create components/bng/deployment.yaml
+# - Add to clusters/bng-local/kustomization.yaml
+# - Uncomment k8s_resource below
+#
 # k8s_resource(
 #     'bng',
-#     port_forwards='8080:8080',  # HTTP API
+#     port_forwards=['8080:8080', '9090:9090'],  # HTTP API, Prometheus metrics
 #     resource_deps=['cilium-agent'],
 #     labels=['bng'],
 # )
