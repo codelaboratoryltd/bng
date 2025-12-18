@@ -9,7 +9,7 @@ This project implements a cloud-native Broadband Network Gateway using eBPF/XDP 
 ### Key Features
 
 - **eBPF/XDP Fast Path**: Kernel-level packet processing for sub-millisecond latency
-- **CRDT State Management**: Distributed state sync via Nexus (CLSet) for multi-region consistency
+- **State Management**: In-memory store with CRDT-ready interface (CLSet integration planned)
 - **Kubernetes Native**: Cilium CNI integration, GitOps deployment
 - **Multi-ISP Support**: Policy-based routing with per-ISP routing tables
 - **Zero-Touch Provisioning**: OLTs self-register and auto-configure
@@ -100,12 +100,13 @@ bgp.AnnouncePrefix(net.ParseCIDR("100.64.0.0/22"))
 
 ### Nexus (`pkg/nexus/`)
 
-CRDT-based distributed state management:
+State management with CRDT-ready interface:
 
-- **Offline-First**: Local cache with background sync
-- **Conflict-Free**: Automatic merge on reconnect
-- **Watch Callbacks**: React to remote state changes
+- **Typed Stores**: Subscribers, NTEs, ISPs, Pools, Devices
+- **Watch Callbacks**: React to state changes
+- **Local Cache**: In-memory with background sync
 - **VLAN Allocation**: S-TAG/C-TAG assignment
+- **Future**: CLSet CRDT backend for multi-region sync
 
 ### Walled Garden (`pkg/walledgarden/`)
 
@@ -122,7 +123,7 @@ Captive portal for unauthenticated subscribers:
 | Packet Processing | eBPF/XDP |
 | Control Plane | Go |
 | Routing Daemon | FRR (bgpd, bfdd) |
-| State Management | CLSet (CRDT) |
+| State Management | In-memory (CRDT-ready) |
 | Container Platform | Kubernetes |
 | CNI | Cilium |
 | Observability | Prometheus, Hubble |
@@ -166,7 +167,7 @@ tilt up
 
 | Component | Status |
 |-----------|--------|
-| Nexus CLSet Client | ✅ Complete |
+| Nexus State Client | ✅ Complete |
 | PON Manager | ✅ Complete |
 | Walled Garden | ✅ Complete |
 | Routing/BGP | ✅ Complete |
@@ -176,10 +177,12 @@ tilt up
 | RADIUS | ✅ Complete |
 | PPPoE | ✅ Complete |
 | Anti-Spoofing | ✅ Complete |
-| eBPF Fast Path | 🚧 In Progress |
-| Audit Logging | 📋 Planned |
-| Lawful Intercept | 📋 Planned |
-| DNS Services | 📋 Planned |
+| Audit Logging | ✅ Complete |
+| Lawful Intercept | ✅ Complete |
+| DNS Services | ✅ Complete |
+| Central State Store | ✅ Complete |
+| Subscriber/Session | 🚧 In Progress |
+| eBPF Fast Path | 📋 Planned |
 
 ## Why eBPF/XDP over VPP?
 
