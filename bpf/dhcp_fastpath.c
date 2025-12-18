@@ -41,16 +41,49 @@ struct dhcp_packet {
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
 
-/* DHCP message types (in options) */
+/* DHCP message types (option 53) */
 #define DHCP_DISCOVER 1
 #define DHCP_OFFER    2
 #define DHCP_REQUEST  3
+#define DHCP_DECLINE  4
 #define DHCP_ACK      5
+#define DHCP_NAK      6
+#define DHCP_RELEASE  7
+#define DHCP_INFORM   8
+
+/* DHCP option codes */
+#define DHCP_OPT_PAD           0
+#define DHCP_OPT_SUBNET_MASK   1
+#define DHCP_OPT_ROUTER        3
+#define DHCP_OPT_DNS           6
+#define DHCP_OPT_HOSTNAME      12
+#define DHCP_OPT_REQUESTED_IP  50
+#define DHCP_OPT_LEASE_TIME    51
+#define DHCP_OPT_MSG_TYPE      53
+#define DHCP_OPT_SERVER_ID     54
+#define DHCP_OPT_RENEWAL_TIME  58
+#define DHCP_OPT_REBIND_TIME   59
+#define DHCP_OPT_END           255
+
+/* DHCP magic cookie */
+#define DHCP_MAGIC_COOKIE 0x63538263  /* Network byte order: 99.130.83.99 */
+
+/* BOOTREQUEST/BOOTREPLY */
+#define BOOTREQUEST 1
+#define BOOTREPLY   2
+
+/* Maximum DHCP options we'll write */
+#define MAX_DHCP_OPTIONS_LEN 64
 
 /* Helper macro for bounds checking (required by eBPF verifier) */
 #define CHECK_BOUNDS(ptr, end, size) \
 	if ((void *)(ptr) + (size) > (void *)(end)) \
 		return XDP_DROP;
+
+/* Bounds check that returns XDP_PASS instead of DROP */
+#define CHECK_BOUNDS_PASS(ptr, end, size) \
+	if ((void *)(ptr) + (size) > (void *)(end)) \
+		return XDP_PASS;
 
 /* Extract MAC address from DHCP packet to u64 */
 static __always_inline __u64 mac_to_u64(__u8 *mac) {
@@ -69,7 +102,7 @@ static __always_inline void update_stats(__u32 counter_type) {
 	if (!stats)
 		return;
 
-	/* counter_type: 0=total, 1=fastpath_hit, 2=fastpath_miss, 3=error */
+	/* counter_type: 0=total, 1=fastpath_hit, 2=fastpath_miss, 3=error, 4=expired */
 	switch (counter_type) {
 	case 0:
 		__sync_fetch_and_add(&stats->total_requests, 1);
@@ -87,6 +120,211 @@ static __always_inline void update_stats(__u32 counter_type) {
 		__sync_fetch_and_add(&stats->cache_expired, 1);
 		break;
 	}
+}
+
+/* Parse DHCP options to find message type */
+static __always_inline __u8 get_dhcp_msg_type(struct dhcp_packet *dhcp, void *data_end) {
+	__u8 *opt = dhcp->options;
+
+	/* Limit option parsing to prevent infinite loops (eBPF verifier) */
+	#pragma unroll
+	for (int i = 0; i < 64; i++) {
+		/* Bounds check for option code */
+		if ((void *)(opt + 1) > data_end)
+			return 0;
+
+		__u8 code = *opt;
+		if (code == DHCP_OPT_END)
+			return 0;
+		if (code == DHCP_OPT_PAD) {
+			opt++;
+			continue;
+		}
+
+		/* Bounds check for option length */
+		if ((void *)(opt + 2) > data_end)
+			return 0;
+
+		__u8 len = *(opt + 1);
+
+		/* Bounds check for option data */
+		if ((void *)(opt + 2 + len) > data_end)
+			return 0;
+
+		if (code == DHCP_OPT_MSG_TYPE && len == 1)
+			return *(opt + 2);
+
+		opt += 2 + len;
+	}
+	return 0;
+}
+
+/* Calculate IP header checksum */
+static __always_inline __u16 ip_checksum(struct iphdr *ip) {
+	__u32 sum = 0;
+	__u16 *buf = (__u16 *)ip;
+
+	/* IP header is 20 bytes = 10 16-bit words (assuming no options) */
+	#pragma unroll
+	for (int i = 0; i < 10; i++) {
+		sum += buf[i];
+	}
+
+	/* Fold 32-bit sum to 16 bits */
+	sum = (sum & 0xFFFF) + (sum >> 16);
+	sum = (sum & 0xFFFF) + (sum >> 16);
+
+	return ~sum;
+}
+
+/* Calculate UDP checksum (simplified - includes pseudo-header) */
+static __always_inline __u16 udp_checksum(struct iphdr *ip, struct udphdr *udp,
+                                          void *data_end, __u16 udp_len) {
+	__u32 sum = 0;
+
+	/* Pseudo-header */
+	sum += (ip->saddr >> 16) & 0xFFFF;
+	sum += ip->saddr & 0xFFFF;
+	sum += (ip->daddr >> 16) & 0xFFFF;
+	sum += ip->daddr & 0xFFFF;
+	sum += bpf_htons(IPPROTO_UDP);
+	sum += bpf_htons(udp_len);
+
+	/* UDP header + data */
+	__u16 *buf = (__u16 *)udp;
+	__u16 words = udp_len / 2;
+
+	/* Limit iterations for eBPF verifier */
+	if (words > 256)
+		words = 256;
+
+	#pragma unroll
+	for (int i = 0; i < 256; i++) {
+		if (i >= words)
+			break;
+		if ((void *)(buf + i + 1) > data_end)
+			break;
+		/* Skip checksum field itself (at offset 3) */
+		if (i == 3)
+			continue;
+		sum += buf[i];
+	}
+
+	/* Handle odd byte */
+	if (udp_len & 1) {
+		__u8 *last = (__u8 *)udp + udp_len - 1;
+		if ((void *)(last + 1) <= data_end)
+			sum += (*last) << 8;
+	}
+
+	/* Fold */
+	sum = (sum & 0xFFFF) + (sum >> 16);
+	sum = (sum & 0xFFFF) + (sum >> 16);
+
+	return sum == 0xFFFF ? sum : ~sum;
+}
+
+/* Generate subnet mask from prefix length */
+static __always_inline __u32 prefix_to_mask(__u8 prefix_len) {
+	if (prefix_len == 0)
+		return 0;
+	if (prefix_len >= 32)
+		return 0xFFFFFFFF;
+	return bpf_htonl(0xFFFFFFFF << (32 - prefix_len));
+}
+
+/* Build DHCP options for reply */
+static __always_inline int build_dhcp_options(__u8 *opt, void *data_end,
+                                              __u8 msg_type,
+                                              struct ip_pool *pool,
+                                              struct pool_assignment *assignment,
+                                              __u32 server_ip) {
+	int offset = 0;
+
+	/* Option 53: DHCP Message Type */
+	if ((void *)(opt + offset + 3) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_MSG_TYPE;
+	opt[offset++] = 1;
+	opt[offset++] = msg_type;
+
+	/* Option 54: Server Identifier */
+	if ((void *)(opt + offset + 6) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_SERVER_ID;
+	opt[offset++] = 4;
+	*(__u32 *)(opt + offset) = server_ip;
+	offset += 4;
+
+	/* Option 51: Lease Time */
+	if ((void *)(opt + offset + 6) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_LEASE_TIME;
+	opt[offset++] = 4;
+	*(__u32 *)(opt + offset) = bpf_htonl(pool->lease_time);
+	offset += 4;
+
+	/* Option 1: Subnet Mask */
+	if ((void *)(opt + offset + 6) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_SUBNET_MASK;
+	opt[offset++] = 4;
+	*(__u32 *)(opt + offset) = prefix_to_mask(pool->prefix_len);
+	offset += 4;
+
+	/* Option 3: Router (Gateway) */
+	if ((void *)(opt + offset + 6) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_ROUTER;
+	opt[offset++] = 4;
+	*(__u32 *)(opt + offset) = pool->gateway;
+	offset += 4;
+
+	/* Option 6: DNS Servers */
+	if (pool->dns_primary != 0) {
+		__u8 dns_len = (pool->dns_secondary != 0) ? 8 : 4;
+		if ((void *)(opt + offset + 2 + dns_len) > data_end)
+			return -1;
+		opt[offset++] = DHCP_OPT_DNS;
+		opt[offset++] = dns_len;
+		*(__u32 *)(opt + offset) = pool->dns_primary;
+		offset += 4;
+		if (pool->dns_secondary != 0) {
+			*(__u32 *)(opt + offset) = pool->dns_secondary;
+			offset += 4;
+		}
+	}
+
+	/* Option 58: Renewal Time (T1) - 50% of lease */
+	if ((void *)(opt + offset + 6) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_RENEWAL_TIME;
+	opt[offset++] = 4;
+	*(__u32 *)(opt + offset) = bpf_htonl(pool->lease_time / 2);
+	offset += 4;
+
+	/* Option 59: Rebinding Time (T2) - 87.5% of lease */
+	if ((void *)(opt + offset + 6) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_REBIND_TIME;
+	opt[offset++] = 4;
+	*(__u32 *)(opt + offset) = bpf_htonl((pool->lease_time * 7) / 8);
+	offset += 4;
+
+	/* Option 255: End */
+	if ((void *)(opt + offset + 1) > data_end)
+		return -1;
+	opt[offset++] = DHCP_OPT_END;
+
+	return offset;
+}
+
+/* Swap MAC addresses in Ethernet header */
+static __always_inline void swap_eth_addrs(struct ethhdr *eth) {
+	__u8 tmp[ETH_ALEN];
+	__builtin_memcpy(tmp, eth->h_dest, ETH_ALEN);
+	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
+	__builtin_memcpy(eth->h_source, tmp, ETH_ALEN);
 }
 
 /* Main XDP program */
@@ -115,17 +353,32 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	struct udphdr *udp = (void *)ip + (ip->ihl * 4);
 	CHECK_BOUNDS(udp, data_end, sizeof(*udp));
 
-	/* Check if DHCP (ports 67/68) */
-	__u16 dest_port = bpf_ntohs(udp->dest);
-	if (dest_port != DHCP_SERVER_PORT && dest_port != DHCP_CLIENT_PORT)
+	/* Check if DHCP request (dest port 67) */
+	if (udp->dest != bpf_htons(DHCP_SERVER_PORT))
 		return XDP_PASS;
 
 	/* Parse DHCP packet */
 	struct dhcp_packet *dhcp = (void *)udp + sizeof(*udp);
 	CHECK_BOUNDS(dhcp, data_end, sizeof(struct dhcp_packet));
 
+	/* Verify BOOTREQUEST */
+	if (dhcp->op != BOOTREQUEST)
+		return XDP_PASS;
+
+	/* Verify DHCP magic cookie */
+	if (dhcp->magic != bpf_htonl(0x63825363))
+		return XDP_PASS;
+
 	/* Update total request counter */
 	update_stats(0);
+
+	/* Extract DHCP message type */
+	__u8 msg_type = get_dhcp_msg_type(dhcp, data_end);
+	if (msg_type != DHCP_DISCOVER && msg_type != DHCP_REQUEST) {
+		/* Other message types (RELEASE, INFORM, etc.) go to slow path */
+		update_stats(2);
+		return XDP_PASS;
+	}
 
 	/* Extract client MAC address */
 	__u64 mac_addr = mac_to_u64(dhcp->chaddr);
@@ -148,21 +401,71 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 		return XDP_PASS;
 	}
 
-	/* CACHE HIT - Fast path! */
+	/* Lookup pool metadata */
+	struct ip_pool *pool = bpf_map_lookup_elem(&ip_pools, &assignment->pool_id);
+	if (!pool) {
+		/* Pool not found - error */
+		update_stats(3);
+		return XDP_PASS;
+	}
+
+	/* CACHE HIT - Fast path! Generate reply in kernel */
 	update_stats(1);
 
-	/* TODO Phase 3: Generate DHCP reply in kernel
-	 * For now, pass to userspace to verify eBPF program loads correctly
-	 */
-	return XDP_PASS;
+	/* Determine reply type */
+	__u8 reply_type = (msg_type == DHCP_DISCOVER) ? DHCP_OFFER : DHCP_ACK;
 
-	/* Future implementation:
-	 * 1. Lookup IP pool metadata
-	 * 2. Generate DHCP OFFER or ACK
-	 * 3. Swap MAC/IP addresses
-	 * 4. Recalculate checksums
-	 * 5. Return XDP_TX (send reply)
-	 */
+	/* === Build DHCP Reply === */
+
+	/* Swap Ethernet addresses */
+	swap_eth_addrs(eth);
+
+	/* Build IP header for reply */
+	__u32 orig_saddr = ip->saddr;
+	ip->saddr = pool->gateway;  /* Server IP (gateway acts as DHCP server) */
+	ip->daddr = 0xFFFFFFFF;     /* Broadcast */
+	ip->ttl = 64;
+	ip->check = 0;
+
+	/* Swap UDP ports */
+	udp->source = bpf_htons(DHCP_SERVER_PORT);
+	udp->dest = bpf_htons(DHCP_CLIENT_PORT);
+	udp->check = 0;  /* UDP checksum optional for IPv4 */
+
+	/* Build DHCP reply */
+	dhcp->op = BOOTREPLY;
+	dhcp->yiaddr = assignment->allocated_ip;  /* Your IP address */
+	dhcp->siaddr = pool->gateway;             /* Server IP */
+
+	/* Build DHCP options */
+	/* Ensure we have room for options (at least 64 bytes) */
+	CHECK_BOUNDS_PASS(dhcp->options, data_end, MAX_DHCP_OPTIONS_LEN);
+
+	int opt_len = build_dhcp_options(dhcp->options, data_end,
+	                                  reply_type, pool, assignment,
+	                                  pool->gateway);
+	if (opt_len < 0) {
+		update_stats(3);
+		return XDP_PASS;
+	}
+
+	/* Calculate total packet size */
+	__u16 dhcp_len = sizeof(struct dhcp_packet) + opt_len;
+	__u16 udp_len = sizeof(struct udphdr) + dhcp_len;
+	__u16 ip_len = sizeof(struct iphdr) + udp_len;
+
+	/* Update lengths */
+	ip->tot_len = bpf_htons(ip_len);
+	udp->len = bpf_htons(udp_len);
+
+	/* Calculate IP checksum */
+	ip->check = ip_checksum(ip);
+
+	/* UDP checksum is optional for IPv4, set to 0 */
+	udp->check = 0;
+
+	/* Transmit reply */
+	return XDP_TX;
 }
 
 char _license[] SEC("license") = "GPL";

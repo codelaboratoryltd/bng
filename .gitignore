@@ -5,6 +5,7 @@
 *.exe
 *.out
 *.test
+/bng
 
 # eBPF compiled objects
 *.bpf.o
@@ -21,6 +22,7 @@ vendor/
 .vscode/
 .idea/
 *.iml
+.claude/
 
 # macOS
 .DS_Store
