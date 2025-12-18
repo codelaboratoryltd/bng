@@ -710,21 +710,333 @@ olt_bng_qos_packets_dropped{ispco_id} 5000
 
 ---
 
+## Upstream Routing Architecture
+
+### Why BGP at the OLT-BNG?
+
+Running BGP directly on each OLT-BNG eliminates single points of failure and enables faster failover:
+
+```
+          ISP-A                    ISP-B
+            │                        │
+    ┌───────┴───────┐        ┌───────┴───────┐
+    │               │        │               │
+    ▼               ▼        ▼               ▼
+┌───────┐       ┌───────┐ ┌───────┐       ┌───────┐
+│OLT-BNG│       │OLT-BNG│ │OLT-BNG│       │OLT-BNG│
+│Site 1 │       │Site 2 │ │Site 1 │       │Site 2 │
+└───────┘       └───────┘ └───────┘       └───────┘
+
+Each OLT-BNG has direct eBGP sessions to ISP PE routers
+- Site 1 fails? Site 2 keeps working
+- ISP-A fails? Traffic shifts to ISP-B
+- No single point of failure
+```
+
+### Physical Network Topology
+
+```
+                                    ┌─────────────────────────────────────┐
+                                    │           INTERNET                  │
+                                    └─────────────────────────────────────┘
+                                                    │
+                          ┌─────────────────────────┼─────────────────────────┐
+                          │                         │                         │
+                          ▼                         ▼                         ▼
+                   ┌────────────┐           ┌────────────┐           ┌────────────┐
+                   │   ISP-A    │           │   ISP-B    │           │   ISP-C    │
+                   │  (NetCo)   │           │  (Retail)  │           │  (Retail)  │
+                   │            │           │            │           │            │
+                   │ AS 64501   │           │ AS 64502   │           │ AS 64503   │
+                   └─────┬──────┘           └─────┬──────┘           └─────┬──────┘
+                         │                        │                        │
+                         │ eBGP sessions          │                        │
+                         │ to each OLT-BNG        │                        │
+                         ▼                        ▼                        ▼
+               ══════════════════════════════════════════════════════════════════
+                              Core/Aggregation Network (L2/MPLS/VXLAN)
+               ══════════════════════════════════════════════════════════════════
+                         │                                            │
+                         │ 10-40 Gbps uplinks                         │
+                         │                                            │
+            ┌────────────┴────────────┐              ┌────────────────┴────────────┐
+            │                         │              │                             │
+            ▼                         ▼              ▼                             ▼
+   ┌─────────────────┐      ┌─────────────────┐    ┌─────────────────┐   ┌─────────────────┐
+   │   OLT-BNG #1    │      │   OLT-BNG #2    │    │   OLT-BNG #3    │   │   OLT-BNG #4    │
+   │   (Edge Site)   │      │   (Edge Site)   │    │   (Edge Site)   │   │   (Edge Site)   │
+   │                 │      │                 │    │                 │   │                 │
+   │ 1,500 subs      │      │ 2,000 subs      │    │ 1,200 subs      │   │ 1,800 subs      │
+   │ AS 64500        │      │ AS 64500        │    │ AS 64500        │   │ AS 64500        │
+   └────────┬────────┘      └────────┬────────┘    └────────┬────────┘   └────────┬────────┘
+            │                        │                      │                     │
+            │ PON                    │                      │                     │
+            ▼                        ▼                      ▼                     ▼
+     ┌──────┴──────┐          ┌──────┴──────┐        ┌──────┴──────┐       ┌──────┴──────┐
+     │ ONT  ONT    │          │ ONT  ONT    │        │ ONT  ONT    │       │ ONT  ONT    │
+     │ ONT  ONT    │          │ ONT  ONT    │        │ ONT  ONT    │       │ ONT  ONT    │
+     │ ...         │          │ ...         │        │ ...         │       │ ...         │
+     └─────────────┘          └─────────────┘        └─────────────┘       └─────────────┘
+        Subscribers              Subscribers            Subscribers           Subscribers
+```
+
+### BGP Integration with FRR
+
+Each OLT-BNG runs FRR (Free Range Routing) as a separate daemon, controlled by our BNG process:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                      OLT-BNG (AS 64500)                                       │
+│                                                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐     │
+│  │                         FRR (bgpd)                                   │     │
+│  │                                                                      │     │
+│  │  neighbor 10.0.0.1 remote-as 64501  (ISP-A PE, primary)             │     │
+│  │  neighbor 10.0.0.2 remote-as 64501  (ISP-A PE, backup)              │     │
+│  │  neighbor 10.0.0.3 remote-as 64502  (ISP-B PE)                      │     │
+│  │                                                                      │     │
+│  │  network 100.64.0.0/22   ← Announce subscriber pool                 │     │
+│  │                                                                      │     │
+│  │  Receives: default route 0.0.0.0/0 from all peers                   │     │
+│  │  Installs: routes via netlink based on BGP best path                │     │
+│  │  Failover: PE dies → automatic convergence                         │     │
+│  │                                                                      │     │
+│  └──────────────────────────────┬──────────────────────────────────────┘     │
+│                                 │                                             │
+│                                 │ Routes installed via netlink                │
+│                                 ▼                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐     │
+│  │                    BNG Process (our code)                            │     │
+│  │                                                                      │     │
+│  │  pkg/routing/Manager                                                 │     │
+│  │    ├── Monitors FRR status via vtysh/gRPC                           │     │
+│  │    ├── Triggers prefix withdraw on local failure                    │     │
+│  │    ├── Policy routing for multi-ISP subscribers                     │     │
+│  │    └── Health checks with BFD integration                           │     │
+│  │                                                                      │     │
+│  │  pkg/routing/BGPController                                          │     │
+│  │    ├── AnnouncePrefix() - tell FRR to advertise                     │     │
+│  │    ├── WithdrawPrefix() - remove advertisement                      │     │
+│  │    └── GetNeighborStatus() - monitor BGP sessions                   │     │
+│  │                                                                      │     │
+│  └─────────────────────────────────────────────────────────────────────┘     │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Multi-ISP Routing with Policy Rules
+
+Subscribers are routed to their ISP using Linux policy routing (ip rules + multiple routing tables):
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                      OLT-BNG (AS 64500)                           │
+│                                                                   │
+│  FRR installs routes per-neighbor into separate tables:          │
+│  ───────────────────────────────────────────────────────         │
+│  Table 100 (ISP-A): default via 10.0.0.1 dev eth0                │
+│  Table 200 (ISP-B): default via 10.0.0.3 dev eth1                │
+│  Table 254 (main):  default via 10.0.0.1 (best path)             │
+│                                                                   │
+│  Policy Rules (managed by pkg/routing/Manager):                  │
+│  ────────────────────────────────────────────                    │
+│  Priority 100: from 100.64.0.50 lookup 100  ← Sub on ISP-A       │
+│  Priority 100: from 100.64.0.51 lookup 200  ← Sub on ISP-B       │
+│  Priority 100: from 100.64.0.52 lookup 100  ← Sub on ISP-A       │
+│  Priority 32766: from all lookup main        ← Default           │
+│                                                                   │
+│  Traffic Flow:                                                    │
+│  ─────────────                                                   │
+│  Subscriber 100.64.0.50 (ISP-A customer)                         │
+│    → Packet src=100.64.0.50                                      │
+│    → Rule match: lookup table 100                                │
+│    → Route: via 10.0.0.1 (ISP-A PE)                              │
+│    → Egress on eth0 to ISP-A                                     │
+│                                                                   │
+│  Subscriber 100.64.0.51 (ISP-B customer)                         │
+│    → Packet src=100.64.0.51                                      │
+│    → Rule match: lookup table 200                                │
+│    → Route: via 10.0.0.3 (ISP-B PE)                              │
+│    → Egress on eth1 to ISP-B                                     │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Upstream Redundancy with ECMP
+
+For ISPs with multiple PE routers, ECMP provides load balancing and redundancy:
+
+```
+                    ISP-A Network (AS 64501)
+                    ┌─────────────────────────────────────────────┐
+                    │                                              │
+                    │   ┌─────────┐           ┌─────────┐         │
+                    │   │  PE-1   │           │  PE-2   │         │
+                    │   │(Primary)│           │(Backup) │         │
+                    │   │10.0.0.1 │           │10.0.0.2 │         │
+                    │   └────┬────┘           └────┬────┘         │
+                    └────────┼─────────────────────┼──────────────┘
+                             │                     │
+                             │ eBGP                │ eBGP
+                             │ weight=100          │ weight=100
+                             │                     │
+┌────────────────────────────┼─────────────────────┼──────────────────────────┐
+│                        OLT-BNG                                               │
+│                                                                              │
+│  FRR Configuration:                                                          │
+│  ──────────────────                                                          │
+│  router bgp 64500                                                            │
+│    neighbor 10.0.0.1 remote-as 64501                                        │
+│    neighbor 10.0.0.2 remote-as 64501                                        │
+│    maximum-paths 2                           ← Enable ECMP                   │
+│                                                                              │
+│  Resulting Route (installed via netlink):                                    │
+│  ────────────────────────────────────────                                    │
+│  default via 10.0.0.1 dev eth0 weight 1                                     │
+│          via 10.0.0.2 dev eth0 weight 1     ← ECMP multipath                │
+│                                                                              │
+│  Traffic Distribution:                                                       │
+│  ─────────────────────                                                      │
+│  Linux kernel hashes (src_ip, dst_ip, src_port, dst_port, protocol)         │
+│  to select next-hop, providing per-flow load balancing                      │
+│                                                                              │
+│  Failover:                                                                   │
+│  ─────────                                                                  │
+│  PE-1 fails → BGP session drops → FRR removes from ECMP                     │
+│            → All traffic via PE-2 (sub-second with BFD)                     │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Health Checking and Fast Failover
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Health Check Architecture                     │
+│                                                                  │
+│  Layer 1: BFD (Bidirectional Forwarding Detection)              │
+│  ─────────────────────────────────────────────────              │
+│  ├── Sub-second failure detection (50ms intervals)             │
+│  ├── Integrated with FRR BGP                                    │
+│  └── Triggers immediate BGP session teardown                    │
+│                                                                  │
+│  Layer 2: BGP Keepalives                                        │
+│  ───────────────────────                                        │
+│  ├── Default: 60s hold time (3x 20s keepalive)                 │
+│  ├── Tunable per-neighbor                                       │
+│  └── Fallback if BFD not available                              │
+│                                                                  │
+│  Layer 3: Application Health (pkg/routing/HealthChecker)        │
+│  ───────────────────────────────────────────────────            │
+│  ├── ICMP ping to upstream gateway                              │
+│  ├── TCP connect to well-known ports                            │
+│  ├── Hysteresis: 3 failures → down, 2 successes → up           │
+│  └── Triggers: prefix withdraw, traffic reroute                 │
+│                                                                  │
+│  Failure Timeline:                                               │
+│  ─────────────────                                              │
+│  T+0ms     Link failure                                         │
+│  T+50ms    BFD detects (if enabled)                             │
+│  T+100ms   BGP session marked down                              │
+│  T+150ms   FRR withdraws routes, installs backup                │
+│  T+200ms   Traffic flowing via backup path                      │
+│                                                                  │
+│  Without BFD:                                                    │
+│  T+0s      Link failure                                         │
+│  T+60s     BGP hold timer expires                               │
+│  T+60.1s   Routes withdrawn, backup installed                   │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### NetCo/ISPCo Traffic Separation
+
+```
+                                 ISP-A (Retail)     ISP-B (Retail)
+                                      │                  │
+                                      │ BGP              │ BGP
+                                      ▼                  ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     NetCo Core Network                            │
+│                                                                   │
+│  NetCo Role:                                                      │
+│  ├── Operates physical infrastructure                            │
+│  ├── Runs OLT-BNG software                                       │
+│  ├── Manages BGP sessions on behalf of ISPs                      │
+│  └── Does NOT see subscriber traffic content                     │
+│                                                                   │
+│  Traffic Isolation:                                               │
+│  ├── Each ISP has separate routing table                         │
+│  ├── Subscriber → ISP mapping from CLSet                         │
+│  ├── Policy rules enforce traffic path                           │
+│  └── ISP-specific NAT pools                                      │
+│                                                                   │
+│  Prefix Announcements:                                            │
+│  ├── NetCo aggregate: 100.64.0.0/10 (covers all sites)          │
+│  ├── Per-site: 100.64.0.0/22 (from each OLT-BNG)                │
+│  └── ISP-specific: Announced to respective ISP only              │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              │ (L2 backhaul)
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                         OLT-BNG                                   │
+│                                                                   │
+│  Subscriber: aa:bb:cc:dd:ee:ff                                   │
+│    CLSet lookup → ispco_id = "ISP-A"                             │
+│    RADIUS → ISP-A server (10.1.0.10)                             │
+│    IP Pool → ISP-A pool (100.64.0.0/24)                          │
+│    Routing → Table 100 (ISP-A gateway)                           │
+│    NAT → ISP-A public pool (203.0.113.0/24)                      │
+│                                                                   │
+│  Subscriber: 11:22:33:44:55:66                                   │
+│    CLSet lookup → ispco_id = "ISP-B"                             │
+│    RADIUS → ISP-B server (10.2.0.10)                             │
+│    IP Pool → ISP-B pool (100.64.1.0/24)                          │
+│    Routing → Table 200 (ISP-B gateway)                           │
+│    NAT → ISP-B public pool (198.51.100.0/24)                     │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Resource Requirements for BGP
+
+FRR is lightweight and easily runs alongside BNG functions:
+
+| Component | CPU | Memory | Notes |
+|-----------|-----|--------|-------|
+| FRR bgpd (few sessions) | ~1% | ~50 MB | 2-4 BGP sessions, default routes only |
+| FRR bgpd (full table) | ~5% | ~500 MB | Receiving full internet routing table |
+| BFD daemon | <1% | ~10 MB | For sub-second failover |
+| **Typical edge deployment** | **~2%** | **~100 MB** | Just default routes + local prefixes |
+
+The OLT hardware (typically 8+ cores, 16+ GB RAM) has plenty of capacity for BGP.
+
+---
+
 ## Glossary
 
 | Term | Definition |
 |------|------------|
+| **BFD** | Bidirectional Forwarding Detection - fast failure detection |
+| **BGP** | Border Gateway Protocol - inter-domain routing |
 | **BNG** | Broadband Network Gateway |
 | **CLSet** | CRDT-based distributed database |
 | **CGNAT** | Carrier-Grade NAT |
 | **CPE** | Customer Premises Equipment |
 | **C-TAG** | Customer VLAN tag (inner) |
+| **eBGP** | External BGP - between different autonomous systems |
+| **ECMP** | Equal-Cost Multi-Path - load balancing across multiple routes |
+| **FRR** | Free Range Routing - open source routing daemon suite |
 | **GPON** | Gigabit Passive Optical Network |
+| **iBGP** | Internal BGP - within the same autonomous system |
 | **ISPCo** | Internet Service Provider Company |
 | **NetCo** | Network Company (infrastructure) |
 | **NTE** | Network Terminating Equipment |
 | **OLT** | Optical Line Terminal |
 | **ONU/ONT** | Optical Network Unit/Terminal |
+| **PE** | Provider Edge router - ISP's border router |
 | **PON** | Passive Optical Network |
 | **S-TAG** | Service VLAN tag (outer) |
 | **XDP** | eXpress Data Path |
