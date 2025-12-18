@@ -59,8 +59,6 @@ See [Architecture Decision section](./ebpf-dhcp-architecture.md#architecture-dec
 
 Mark Gascoyne
 Lead Software Engineer
-Vitrifi (Telecoms/ISP)
-
 ## License
 
 TBD
