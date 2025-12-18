@@ -36,11 +36,6 @@
 #define NAT_SESSION_TIMEOUT_NS (300ULL * 1000000000ULL) /* 5 minutes */
 #define TCP_EST_TIMEOUT_NS    (7200ULL * 1000000000ULL) /* 2 hours for established */
 
-/* Protocol numbers */
-#define IPPROTO_TCP  6
-#define IPPROTO_UDP  17
-#define IPPROTO_ICMP 1
-
 /* NAT session state */
 enum nat_state {
 	NAT_STATE_NEW = 0,

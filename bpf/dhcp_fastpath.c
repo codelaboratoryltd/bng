@@ -75,6 +75,14 @@ struct dhcp_packet {
 /* Maximum DHCP options we'll write */
 #define MAX_DHCP_OPTIONS_LEN 64
 
+/* Minimum DHCP packet size (with required options) */
+#define MIN_DHCP_PACKET_SIZE (sizeof(struct ethhdr) + sizeof(struct iphdr) + \
+                              sizeof(struct udphdr) + sizeof(struct dhcp_packet) + \
+                              MAX_DHCP_OPTIONS_LEN)
+
+/* Broadcast MAC address */
+static const __u8 broadcast_mac[ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
 /* Helper macro for bounds checking (required by eBPF verifier) */
 #define CHECK_BOUNDS(ptr, end, size) \
 	if ((void *)(ptr) + (size) > (void *)(end)) \
@@ -177,53 +185,6 @@ static __always_inline __u16 ip_checksum(struct iphdr *ip) {
 	return ~sum;
 }
 
-/* Calculate UDP checksum (simplified - includes pseudo-header) */
-static __always_inline __u16 udp_checksum(struct iphdr *ip, struct udphdr *udp,
-                                          void *data_end, __u16 udp_len) {
-	__u32 sum = 0;
-
-	/* Pseudo-header */
-	sum += (ip->saddr >> 16) & 0xFFFF;
-	sum += ip->saddr & 0xFFFF;
-	sum += (ip->daddr >> 16) & 0xFFFF;
-	sum += ip->daddr & 0xFFFF;
-	sum += bpf_htons(IPPROTO_UDP);
-	sum += bpf_htons(udp_len);
-
-	/* UDP header + data */
-	__u16 *buf = (__u16 *)udp;
-	__u16 words = udp_len / 2;
-
-	/* Limit iterations for eBPF verifier */
-	if (words > 256)
-		words = 256;
-
-	#pragma unroll
-	for (int i = 0; i < 256; i++) {
-		if (i >= words)
-			break;
-		if ((void *)(buf + i + 1) > data_end)
-			break;
-		/* Skip checksum field itself (at offset 3) */
-		if (i == 3)
-			continue;
-		sum += buf[i];
-	}
-
-	/* Handle odd byte */
-	if (udp_len & 1) {
-		__u8 *last = (__u8 *)udp + udp_len - 1;
-		if ((void *)(last + 1) <= data_end)
-			sum += (*last) << 8;
-	}
-
-	/* Fold */
-	sum = (sum & 0xFFFF) + (sum >> 16);
-	sum = (sum & 0xFFFF) + (sum >> 16);
-
-	return sum == 0xFFFF ? sum : ~sum;
-}
-
 /* Generate subnet mask from prefix length */
 static __always_inline __u32 prefix_to_mask(__u8 prefix_len) {
 	if (prefix_len == 0)
@@ -319,12 +280,30 @@ static __always_inline int build_dhcp_options(__u8 *opt, void *data_end,
 	return offset;
 }
 
-/* Swap MAC addresses in Ethernet header */
-static __always_inline void swap_eth_addrs(struct ethhdr *eth) {
-	__u8 tmp[ETH_ALEN];
-	__builtin_memcpy(tmp, eth->h_dest, ETH_ALEN);
-	__builtin_memcpy(eth->h_dest, eth->h_source, ETH_ALEN);
-	__builtin_memcpy(eth->h_source, tmp, ETH_ALEN);
+/* Set MAC addresses for DHCP reply
+ * - Destination: Broadcast (FF:FF:FF:FF:FF:FF) for clients without IP
+ *   or unicast to client MAC if BROADCAST flag is clear
+ * - Source: DHCP server's MAC address
+ */
+static __always_inline void set_reply_eth_addrs(struct ethhdr *eth,
+                                                 struct dhcp_packet *dhcp,
+                                                 __u8 *server_mac) {
+	/* Check DHCP BROADCAST flag (bit 15 of flags field) */
+	__u16 flags = bpf_ntohs(dhcp->flags);
+
+	if (flags & 0x8000) {
+		/* BROADCAST flag set - use broadcast MAC */
+		__builtin_memcpy(eth->h_dest, broadcast_mac, ETH_ALEN);
+	} else if (dhcp->ciaddr != 0) {
+		/* Client has IP - send unicast to client MAC */
+		__builtin_memcpy(eth->h_dest, dhcp->chaddr, ETH_ALEN);
+	} else {
+		/* DISCOVER/REQUEST without ciaddr - use broadcast */
+		__builtin_memcpy(eth->h_dest, broadcast_mac, ETH_ALEN);
+	}
+
+	/* Source is always server MAC */
+	__builtin_memcpy(eth->h_source, server_mac, ETH_ALEN);
 }
 
 /* Main XDP program */
@@ -412,17 +391,28 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	/* CACHE HIT - Fast path! Generate reply in kernel */
 	update_stats(1);
 
+	/* Get server configuration */
+	__u32 config_key = 0;
+	struct dhcp_server_config *config = bpf_map_lookup_elem(&server_config, &config_key);
+	if (!config) {
+		/* No server config - can't generate reply */
+		update_stats(3);
+		return XDP_PASS;
+	}
+
 	/* Determine reply type */
 	__u8 reply_type = (msg_type == DHCP_DISCOVER) ? DHCP_OFFER : DHCP_ACK;
 
 	/* === Build DHCP Reply === */
 
-	/* Swap Ethernet addresses */
-	swap_eth_addrs(eth);
+	/* Set proper MAC addresses for reply */
+	set_reply_eth_addrs(eth, dhcp, config->server_mac);
+
+	/* Server IP - use config if set, otherwise pool gateway */
+	__u32 server_ip = (config->server_ip != 0) ? config->server_ip : pool->gateway;
 
 	/* Build IP header for reply */
-	__u32 orig_saddr = ip->saddr;
-	ip->saddr = pool->gateway;  /* Server IP (gateway acts as DHCP server) */
+	ip->saddr = server_ip;
 	ip->daddr = 0xFFFFFFFF;     /* Broadcast */
 	ip->ttl = 64;
 	ip->check = 0;
@@ -434,8 +424,12 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 
 	/* Build DHCP reply */
 	dhcp->op = BOOTREPLY;
+	dhcp->hops = 0;
 	dhcp->yiaddr = assignment->allocated_ip;  /* Your IP address */
-	dhcp->siaddr = pool->gateway;             /* Server IP */
+	dhcp->siaddr = server_ip;                 /* Server IP */
+	/* Clear sname and file to avoid leaking request data */
+	__builtin_memset(dhcp->sname, 0, sizeof(dhcp->sname));
+	__builtin_memset(dhcp->file, 0, sizeof(dhcp->file));
 
 	/* Build DHCP options */
 	/* Ensure we have room for options (at least 64 bytes) */
@@ -443,7 +437,7 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 
 	int opt_len = build_dhcp_options(dhcp->options, data_end,
 	                                  reply_type, pool, assignment,
-	                                  pool->gateway);
+	                                  server_ip);
 	if (opt_len < 0) {
 		update_stats(3);
 		return XDP_PASS;
@@ -453,8 +447,24 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	__u16 dhcp_len = sizeof(struct dhcp_packet) + opt_len;
 	__u16 udp_len = sizeof(struct udphdr) + dhcp_len;
 	__u16 ip_len = sizeof(struct iphdr) + udp_len;
+	__u16 total_len = sizeof(struct ethhdr) + ip_len;
 
-	/* Update lengths */
+	/* Calculate original packet size */
+	__u16 orig_len = (__u16)((long)data_end - (long)data);
+
+	/* Adjust packet tail if needed */
+	int delta = (int)total_len - (int)orig_len;
+	if (delta != 0) {
+		if (bpf_xdp_adjust_tail(ctx, delta) != 0) {
+			/* Failed to adjust - fall back to slow path */
+			update_stats(3);
+			return XDP_PASS;
+		}
+		/* Re-fetch data_end after adjustment */
+		data_end = (void *)(long)ctx->data_end;
+	}
+
+	/* Update lengths in headers */
 	ip->tot_len = bpf_htons(ip_len);
 	udp->len = bpf_htons(udp_len);
 
