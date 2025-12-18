@@ -53,14 +53,29 @@ struct {
 	__type(value, struct ip_pool);
 } ip_pools SEC(".maps");
 
-/* Performance counters */
+/* DHCP server configuration */
+struct dhcp_server_config {
+	__u8  server_mac[6];    /* Server's MAC address */
+	__u8  _pad[2];
+	__u32 server_ip;        /* Server's IP address (network byte order) */
+	__u32 interface_index;  /* Interface index for XDP */
+} __attribute__((packed));
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);   /* Always 0 */
+	__type(value, struct dhcp_server_config);
+} server_config SEC(".maps");
+
+/* Performance counters - not packed to ensure proper alignment for atomic ops */
 struct dhcp_stats {
 	__u64 total_requests;
 	__u64 fastpath_hits;
 	__u64 fastpath_misses;
 	__u64 errors;
 	__u64 cache_expired;
-} __attribute__((packed));
+};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
