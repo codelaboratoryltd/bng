@@ -116,7 +116,7 @@ Subscriber → ONT-123 → OLT → VLAN 200:100 → ISP B RADIUS → ISP B IP Po
 │                         CLSet Mesh                               │
 │              (CRDT - Distributed Configuration & State)          │
 │                                                                  │
-│  Neelix Server(s)          Neelix Server(s)                     │
+│  Nexus Server(s)          Nexus Server(s)                     │
 │  (Regional POP 1)          (Regional POP 2)                     │
 │       ↕ sync                    ↕ sync                          │
 └──────────────────────────────────────────────────────────────────┘
@@ -162,17 +162,17 @@ OLT routes RADIUS requests based on subscriber's ispco_id
 
 | Component | Location | Responsibility |
 |-----------|----------|----------------|
-| **Neelix Server** | Regional POP | Full CLSet node, bootstrap API, image registry |
-| **Neelix Agent** | OLT | CLSet client, local cache, offline operation |
+| **Nexus Server** | Regional POP | Full CLSet node, bootstrap API, image registry |
+| **Nexus Agent** | OLT | CLSet client, local cache, offline operation |
 | **OLT-BNG** | OLT | Single binary: PON mgmt, DHCP, NAT, QoS, RADIUS |
 | **eBPF Programs** | OLT Kernel | Fast path: packet processing, rate limiting |
 | **ISP RADIUS** | ISP POP | Authentication, authorization, accounting |
 
 ---
 
-## Neelix Server
+## Nexus Server
 
-The Neelix Server runs at regional POPs (Points of Presence) and provides:
+The Nexus Server runs at regional POPs (Points of Presence) and provides:
 
 ### Bootstrap API
 
@@ -206,7 +206,7 @@ GET /api/v1/images/{image-name}/manifest
 
 ---
 
-## Neelix Agent (OLT-Side)
+## Nexus Agent (OLT-Side)
 
 The agent runs on each OLT as part of the OLT-BNG binary.
 
@@ -240,7 +240,7 @@ The agent runs on each OLT as part of the OLT-BNG binary.
 
 ### Offline Operation
 
-When the OLT loses connectivity to the Neelix Server:
+When the OLT loses connectivity to the Nexus Server:
 
 **Continues Working:**
 - Existing subscriber sessions (cached in local CLSet)
@@ -263,7 +263,7 @@ When the OLT loses connectivity to the Neelix Server:
 ### Local Cache Structure
 
 ```
-/var/lib/neelix/
+/var/lib/nexus/
 ├── clset/              # Local CLSet database
 │   ├── devices/        # Device configurations
 │   ├── subscribers/    # Subscriber state
@@ -287,7 +287,7 @@ A single statically-linked binary containing all BNG functionality.
 │                         olt-bng binary                          │
 │                                                                 │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │                    Neelix Agent                           │  │
+│  │                    Nexus Agent                           │  │
 │  │  ┌────────────┐  ┌────────────┐  ┌────────────────────┐  │  │
 │  │  │ Bootstrap  │  │  CLSet     │  │  Config Watcher    │  │  │
 │  │  │            │  │  Client    │  │                    │  │  │
@@ -327,7 +327,7 @@ A single statically-linked binary containing all BNG functionality.
 
 ```
 pkg/
-├── agent/              # Neelix agent (CLSet client, state machine)
+├── agent/              # Nexus agent (CLSet client, state machine)
 │   ├── agent.go        # Main agent logic
 │   ├── bootstrap.go    # Device registration
 │   ├── clset.go        # CLSet client wrapper
@@ -405,7 +405,7 @@ pkg/
                               │  └────────────┬─────────────┘ │
                               │               │               │
                               │  ┌────────────┴─────────────┐ │
-                              │  │     Neelix Server        │ │
+                              │  │     Nexus Server        │ │
                               │  │   (NetCo operated)       │ │
                               │  └────────────┬─────────────┘ │
                               │               │               │
@@ -429,7 +429,7 @@ BACKHAUL FIBER (OLT → Aggregation)
 ┌─────────────────────────────────────────────────────────────┐
 │                                                             │
 │  VLAN 100: Management Plane (NetCo)                        │
-│  ├── OLT ↔ Neelix Server (CLSet sync, gRPC)               │
+│  ├── OLT ↔ Nexus Server (CLSet sync, gRPC)               │
 │  ├── OLT ↔ Registry (OCI image pull)                       │
 │  └── OLT ↔ Prometheus (metrics scrape)                     │
 │                                                             │
@@ -540,7 +540,7 @@ BACKHAUL FIBER (OLT → Aggregation)
 │ 2. BOOTSTRAP PHASE                                              │
 │    ├── Read serial from DMI/SMBIOS                             │
 │    ├── Get IP via DHCP on management VLAN                      │
-│    └── Resolve Neelix server                                   │
+│    └── Resolve Nexus server                                   │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼

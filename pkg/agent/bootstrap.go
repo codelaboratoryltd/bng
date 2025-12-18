@@ -16,8 +16,8 @@ import (
 
 // BootstrapConfig contains settings for the bootstrap process.
 type BootstrapConfig struct {
-	// NeelixServerURL is the URL of the Neelix server bootstrap API.
-	NeelixServerURL string `yaml:"neelix_server_url"`
+	// NexusServerURL is the URL of the Nexus server bootstrap API.
+	NexusServerURL string `yaml:"nexus_server_url"`
 
 	// SerialOverride allows overriding the hardware serial (for testing).
 	SerialOverride string `yaml:"serial_override,omitempty"`
@@ -261,7 +261,7 @@ func (b *Bootstrap) detectCapabilities() []string {
 	return caps
 }
 
-// Register attempts to register this device with the Neelix server.
+// Register attempts to register this device with the Nexus server.
 func (b *Bootstrap) Register(ctx context.Context) (*RegistrationResponse, error) {
 	info, err := b.GetDeviceInfo()
 	if err != nil {
@@ -335,7 +335,7 @@ func (b *Bootstrap) sendRegistration(ctx context.Context, req *RegistrationReque
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	url := b.config.NeelixServerURL + "/api/v1/devices/register"
+	url := b.config.NexusServerURL + "/api/v1/devices/register"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)

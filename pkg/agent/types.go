@@ -1,4 +1,4 @@
-// Package agent implements the Neelix agent for OLT-BNG devices.
+// Package agent implements the Nexus agent for OLT-BNG devices.
 // The agent handles device registration, CLSet synchronization,
 // configuration management, and offline operation.
 package agent
@@ -48,13 +48,13 @@ type DeviceInfo struct {
 	Capabilities []string `json:"capabilities"`
 }
 
-// RegistrationRequest is sent to the Neelix server during bootstrap.
+// RegistrationRequest is sent to the Nexus server during bootstrap.
 type RegistrationRequest struct {
 	DeviceInfo
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// RegistrationResponse is returned by the Neelix server.
+// RegistrationResponse is returned by the Nexus server.
 type RegistrationResponse struct {
 	Status     string        `json:"status"` // "approved", "pending", "rejected"
 	DeviceID   string        `json:"device_id,omitempty"`

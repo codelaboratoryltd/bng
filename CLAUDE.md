@@ -192,7 +192,7 @@ tilt up
   - Two-tier fast path/slow path architecture
   - VPP vs eBPF decision analysis with edge performance calculations
   - eBPF implementation details (maps, XDP program)
-  - Integration with CRDT state management (Neelix - future)
+  - Integration with CRDT state management (Nexus - future)
   - Performance analysis and cost savings
   - Implementation roadmap (12 weeks, 5 phases)
   - Full code examples (eBPF C + Go integration)
@@ -205,11 +205,11 @@ tilt up
   - Phase 1: Local dev environment (k3d, Cilium, Tilt) ← **CURRENT FOCUS**
   - Phase 2: eBPF development toolchain
   - Phase 3: DHCP fast path POC
-  - Phase 4: Stub state management (no Neelix/Brushtail yet)
+  - Phase 4: Stub state management (no Nexus/Brushtail yet)
   - Phase 5: Observability and metrics
   - Phase 6: BNG core features (QoS, NAT, RADIUS stubs)
   - Phase 7: Production readiness
-  - Phase 8: Future enhancements (PPPoE, real Neelix integration)
+  - Phase 8: Future enhancements (PPPoE, real Nexus integration)
 
 - **`FEATURES.md`**: Comprehensive BNG feature specification
   - 12 core BNG functions with detailed requirements
@@ -336,15 +336,15 @@ ports:
 ### POC Phase (Current)
 
 **Simple in-memory state store** (`pkg/state/`):
-- No Neelix/Brushtail integration yet
+- No Nexus/Brushtail integration yet
 - In-memory subscriber database
 - BoltDB/SQLite for persistence (optional)
 - Focus on proving eBPF fast path works
 
 ### Future (Post-POC)
 
-**Integration with Neelix (CRDT)**:
-- Replace in-memory store with Neelix client
+**Integration with Nexus (CRDT)**:
+- Replace in-memory store with Nexus client
 - Multi-region state synchronization
 - Conflict resolution via CRDT
 - Session roaming support
@@ -355,8 +355,8 @@ ports:
 - Leverage Brushtail's RADIUS integration
 
 See `ebpf-dhcp-architecture.md` sections:
-- "Integration with Neelix (CRDT)"
-- "Future Enhancements" → "Neelix Integration" and "Brushtail Integration"
+- "Integration with Nexus (CRDT)"
+- "Future Enhancements" → "Nexus Integration" and "Brushtail Integration"
 
 ## Performance Targets and Metrics
 
@@ -604,7 +604,7 @@ hubble observe --protocol dhcp --last 10
 - Feature spec: `FEATURES.md`
 - Vitrifi Borg repo: `/Users/markgascoyne/go/src/gitlab.com/vitrifi/borg`
   - Brushtail DHCP: `src/cne/brushtail/`
-  - Neelix CRDT: `src/shared/neelix/`
+  - Nexus CRDT: `src/shared/nexus/`
 
 ## Project Context
 
@@ -634,7 +634,7 @@ This project was created to:
 
 **Production Readiness** (Future):
 - Session persistence across restarts
-- Multi-region state sync (Neelix integration)
+- Multi-region state sync (Nexus integration)
 - QoS and NAT working in production
 - 99.9% uptime SLA
 
