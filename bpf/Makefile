@@ -9,7 +9,7 @@ ARCH := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 OUTPUT := .
 
 # eBPF programs to compile
-BPF_PROGRAMS := dhcp_fastpath.bpf.o
+BPF_PROGRAMS := dhcp_fastpath.bpf.o qos_ratelimit.bpf.o nat44.bpf.o antispoof.bpf.o
 
 # Compiler flags
 CFLAGS := -O2 -g -Wall -Werror \
