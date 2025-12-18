@@ -23,7 +23,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Bootstrap:         DefaultBootstrapConfig(),
-		DataDir:           "/var/lib/neelix",
+		DataDir:           "/var/lib/nexus",
 		HeartbeatInterval: 30 * time.Second,
 	}
 }
@@ -37,7 +37,7 @@ type ConfigChangeHandler func(change ConfigChange)
 // ISPChurnHandler is called when a subscriber changes ISPs.
 type ISPChurnHandler func(event ISPChurnEvent)
 
-// Agent is the main Neelix agent that runs on each OLT.
+// Agent is the main Nexus agent that runs on each OLT.
 type Agent struct {
 	config       Config
 	logger       *zap.Logger
@@ -77,8 +77,8 @@ type Agent struct {
 
 // New creates a new Agent instance.
 func New(config Config, logger *zap.Logger) (*Agent, error) {
-	if config.Bootstrap.NeelixServerURL == "" {
-		return nil, fmt.Errorf("neelix_server_url is required")
+	if config.Bootstrap.NexusServerURL == "" {
+		return nil, fmt.Errorf("nexus_server_url is required")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,7 +101,7 @@ func New(config Config, logger *zap.Logger) (*Agent, error) {
 
 // Start starts the agent.
 func (a *Agent) Start() error {
-	a.logger.Info("Starting Neelix agent", zap.String("version", Version))
+	a.logger.Info("Starting Nexus agent", zap.String("version", Version))
 
 	// Get device info
 	var err error
@@ -125,7 +125,7 @@ func (a *Agent) Start() error {
 
 // Stop stops the agent gracefully.
 func (a *Agent) Stop() error {
-	a.logger.Info("Stopping Neelix agent")
+	a.logger.Info("Stopping Nexus agent")
 	a.cancel()
 	a.wg.Wait()
 	return nil

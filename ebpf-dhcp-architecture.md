@@ -10,7 +10,7 @@ This document outlines an architecture for accelerating ISP DHCP services using 
 
 **Key Technologies:**
 - eBPF/XDP (kernel-level packet processing)
-- CRDT (Conflict-free Replicated Data Types via Neelix)
+- CRDT (Conflict-free Replicated Data Types via Nexus)
 - Kubernetes (cloud-native deployment)
 - NATS (distributed messaging)
 
@@ -27,7 +27,7 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
 4. [Architecture Decision: eBPF vs VPP](#architecture-decision-ebpf-vs-vpp)
 5. [System Architecture](#system-architecture)
 6. [eBPF Implementation](#ebpf-implementation)
-7. [Integration with Neelix (CRDT)](#integration-with-neelix-crdt)
+7. [Integration with Nexus (CRDT)](#integration-with-nexus-crdt)
 8. [Performance Analysis](#performance-analysis)
 9. [Implementation Roadmap](#implementation-roadmap)
 10. [Code Examples](#code-examples)
@@ -73,11 +73,11 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
 │  1. Parse DHCP packet                           │
 │  2. Client classification                       │
 │  3. Pool selection                              │
-│  4. Query Neelix/Postgres for available IP      │
+│  4. Query Nexus/Postgres for available IP      │
 │     ↑ Database query = 5-10ms                   │
 │  5. Allocate lease                              │
 │  6. Generate DHCP OFFER                         │
-│  7. Update Neelix with allocation               │
+│  7. Update Nexus with allocation               │
 │                                                  │
 └─────────────────┬───────────────────────────────┘
                   │ DHCP OFFER
@@ -129,7 +129,7 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
 │                                                  │
 │  • Client classification                        │
 │  • Pool selection                               │
-│  • Query Neelix (CRDT) for IP                   │
+│  • Query Nexus (CRDT) for IP                   │
 │  • Allocate lease                               │
 │  • Update eBPF maps (cache for future)          │
 │  • Generate DHCP OFFER                          │
@@ -140,7 +140,7 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
                   │
                   ↓
 ┌─────────────────────────────────────────────────┐
-│  Neelix (CRDT State Store)                      │
+│  Nexus (CRDT State Store)                      │
 │  • Distributed IP allocation table              │
 │  • Multi-region synchronisation                 │
 │  • Eventual consistency                         │
@@ -405,7 +405,7 @@ Subscriber traffic (kernel stack after DHCP):
 │  │ Control Plane Pods (Go)        │     │
 │  │  - Brushtail DHCP               │     │
 │  │  - RADIUS client                │     │
-│  │  - Neelix CRDT sync             │     │
+│  │  - Nexus CRDT sync             │     │
 │  └────────────────────────────────┘     │
 └─────────────────────────────────────────┘
           ↓ 10-40 Gbps uplink
@@ -453,7 +453,7 @@ Subscriber traffic (kernel stack after DHCP):
 │  ┌────────────────────────────────┐     │
 │  │ Brushtail DHCP (Go pod)        │     │
 │  │  - Slow path DHCP               │     │
-│  │  - Neelix CRDT integration      │     │
+│  │  - Nexus CRDT integration      │     │
 │  └────────────────────────────────┘     │
 │                                          │
 │  ┌────────────────────────────────┐     │
@@ -537,12 +537,12 @@ Uplink NIC:     10G or 40G (standard routing)
 │  │  │ - Client classification                  │    │    │
 │  │  │ - Complex allocation logic               │    │    │
 │  │  │ - eBPF map management                    │    │    │
-│  │  │ - Neelix integration                     │    │    │
+│  │  │ - Nexus integration                     │    │    │
 │  │  └──────────────────────────────────────────┘    │    │
 │  └──────────────────────────────────────────────────┘    │
 │                          ↕                                 │
 │  ┌──────────────────────────────────────────────────┐    │
-│  │ Neelix (Local instance)                          │    │
+│  │ Nexus (Local instance)                          │    │
 │  │ - Local CRDT replica                             │    │
 │  │ - Stores IP allocations                          │    │
 │  └──────────────────────────────────────────────────┘    │
@@ -551,7 +551,7 @@ Uplink NIC:     10G or 40G (standard routing)
                     (NATS/CRDT Sync)
                           ↕
 ┌───────────────────────────────────────────────────────────┐
-│  Neelix Cluster (Distributed State)                       │
+│  Nexus Cluster (Distributed State)                       │
 │  - Multi-region CRDT consensus                            │
 │  - IP allocation conflict resolution                      │
 │  - Subscriber → IP mapping                                │
@@ -579,16 +579,16 @@ Uplink NIC:     10G or 40G (standard routing)
 ```
 5. Brushtail classifies client (residential/business)
 6. Selects IP pool based on classification
-7. Queries Neelix for available IP
-8. Neelix allocates IP (CRDT operation)
+7. Queries Nexus for available IP
+8. Nexus allocates IP (CRDT operation)
 9. Brushtail generates DHCP OFFER
 10. Brushtail updates eBPF map (cache allocation)
 ```
 
 **Step 3: CRDT Synchronisation**
 ```
-11. Neelix broadcasts allocation to other regions (NATS)
-12. Neelix instances at other edge locations receive update
+11. Nexus broadcasts allocation to other regions (NATS)
+12. Nexus instances at other edge locations receive update
 13. Other Brushtail instances update their eBPF maps
 ```
 
@@ -802,11 +802,11 @@ static __always_inline void generate_dhcp_reply(
 
 ---
 
-## Integration with Neelix (CRDT)
+## Integration with Nexus (CRDT)
 
-### Neelix Role
+### Nexus Role
 
-Neelix provides **distributed state synchronisation** across edge locations:
+Nexus provides **distributed state synchronisation** across edge locations:
 
 1. **IP Allocation Conflict Resolution**
    - Two edge locations try to allocate same IP → CRDT resolves
@@ -818,10 +818,10 @@ Neelix provides **distributed state synchronisation** across edge locations:
 
 3. **State Recovery**
    - eBPF maps are volatile (lost on pod restart)
-   - Neelix provides persistent state
-   - On startup, Brushtail repopulates eBPF maps from Neelix
+   - Nexus provides persistent state
+   - On startup, Brushtail repopulates eBPF maps from Nexus
 
-### Data Flow: Neelix ↔ Brushtail
+### Data Flow: Nexus ↔ Brushtail
 
 ```go
 // Brushtail userspace code
@@ -829,7 +829,7 @@ package main
 
 import (
     "github.com/cilium/ebpf"
-    "neelix-client" // Hypothetical Neelix Go client
+    "nexus-client" // Hypothetical Nexus Go client
 )
 
 type DHCPServer struct {
@@ -838,14 +838,14 @@ type DHCPServer struct {
     ipPools         *ebpf.Map
     activeLeases    *ebpf.Map
 
-    // Neelix client
-    neelix *neelix.Client
+    // Nexus client
+    nexus *nexus.Client
 }
 
 // Handle new allocation (slow path)
 func (s *DHCPServer) AllocateLease(mac uint64, clientClass string) (net.IP, error) {
-    // 1. Query Neelix for available IP
-    ip, err := s.neelix.AllocateIP(mac, clientClass)
+    // 1. Query Nexus for available IP
+    ip, err := s.nexus.AllocateIP(mac, clientClass)
     if err != nil {
         return nil, err
     }
@@ -864,15 +864,15 @@ func (s *DHCPServer) AllocateLease(mac uint64, clientClass string) (net.IP, erro
         // Don't fail DHCP, eBPF cache is best-effort
     }
 
-    // 3. Neelix broadcasts allocation to other regions (CRDT)
-    // This happens automatically in Neelix via NATS
+    // 3. Nexus broadcasts allocation to other regions (CRDT)
+    // This happens automatically in Nexus via NATS
 
     return ip, nil
 }
 
-// Handle Neelix updates from other regions
-func (s *DHCPServer) WatchNeelixUpdates() {
-    updates := s.neelix.Watch("ip-allocations")
+// Handle Nexus updates from other regions
+func (s *DHCPServer) WatchNexusUpdates() {
+    updates := s.nexus.Watch("ip-allocations")
 
     for update := range updates {
         // Another region allocated IP
@@ -887,15 +887,15 @@ func (s *DHCPServer) WatchNeelixUpdates() {
         }
 
         if err := s.subscriberPools.Put(mac, assignment); err != nil {
-            log.Error("Failed to sync eBPF map from Neelix", err)
+            log.Error("Failed to sync eBPF map from Nexus", err)
         }
     }
 }
 
-// Populate eBPF maps on startup from Neelix
+// Populate eBPF maps on startup from Nexus
 func (s *DHCPServer) Initialize() error {
-    // Fetch all active leases from Neelix
-    leases, err := s.neelix.GetActiveLeases()
+    // Fetch all active leases from Nexus
+    leases, err := s.nexus.GetActiveLeases()
     if err != nil {
         return err
     }
@@ -915,7 +915,7 @@ func (s *DHCPServer) Initialize() error {
         }
     }
 
-    log.Info("Populated eBPF maps with %d leases from Neelix", len(leases))
+    log.Info("Populated eBPF maps with %d leases from Nexus", len(leases))
     return nil
 }
 ```
@@ -932,11 +932,11 @@ Time T0:
 Time T1:
   Edge A: Allocates 10.0.1.100 to Subscriber 1
   Edge B: Allocates 10.0.1.100 to Subscriber 2
-  (Both write to local Neelix replica)
+  (Both write to local Nexus replica)
 
 Time T2:
   NATS propagates both allocations
-  Neelix CRDT detects conflict
+  Nexus CRDT detects conflict
 
 Time T3:
   CRDT resolution (vector clock comparison):
@@ -1045,20 +1045,20 @@ CPU = 0.8 × 0.2 cores + 0.2 × 3.5 cores = 0.9 cores
 
 ---
 
-### Phase 3: Neelix Integration (3 weeks)
+### Phase 3: Nexus Integration (3 weeks)
 
-**Goal:** Sync eBPF cache with Neelix CRDT state
+**Goal:** Sync eBPF cache with Nexus CRDT state
 
 **Tasks:**
-1. Watch Neelix for allocation updates
-2. Update eBPF maps when Neelix syncs from other regions
-3. Repopulate eBPF maps from Neelix on pod restart
+1. Watch Nexus for allocation updates
+2. Update eBPF maps when Nexus syncs from other regions
+3. Repopulate eBPF maps from Nexus on pod restart
 4. Handle CRDT conflicts (revoke leases if needed)
 
 **Success Criteria:**
-- eBPF cache stays in sync with Neelix
+- eBPF cache stays in sync with Nexus
 - Multi-region allocations propagate correctly
-- Pod restart recovers eBPF state from Neelix
+- Pod restart recovers eBPF state from Nexus
 
 ---
 
@@ -1128,8 +1128,8 @@ type BrushtailServer struct {
     ipPools         *ebpf.Map
     activeLeases    *ebpf.Map
 
-    // Neelix client
-    neelix *NeelixClient
+    // Nexus client
+    nexus *NexusClient
 }
 
 func NewBrushtailServer(iface string) (*BrushtailServer, error) {
@@ -1166,27 +1166,27 @@ func NewBrushtailServer(iface string) (*BrushtailServer, error) {
         activeLeases:    coll.Maps["active_leases"],
     }
 
-    // Initialize from Neelix
-    if err := s.initializeFromNeelix(); err != nil {
-        return nil, fmt.Errorf("initialize from Neelix: %w", err)
+    // Initialize from Nexus
+    if err := s.initializeFromNexus(); err != nil {
+        return nil, fmt.Errorf("initialize from Nexus: %w", err)
     }
 
-    // Start watching Neelix updates
-    go s.watchNeelixUpdates()
+    // Start watching Nexus updates
+    go s.watchNexusUpdates()
 
     return s, nil
 }
 
-func (s *BrushtailServer) initializeFromNeelix() error {
+func (s *BrushtailServer) initializeFromNexus() error {
     ctx := context.Background()
 
-    // Fetch all active leases from Neelix
-    leases, err := s.neelix.GetActiveLeases(ctx)
+    // Fetch all active leases from Nexus
+    leases, err := s.nexus.GetActiveLeases(ctx)
     if err != nil {
         return err
     }
 
-    log.Printf("Populating eBPF maps with %d leases from Neelix", len(leases))
+    log.Printf("Populating eBPF maps with %d leases from Nexus", len(leases))
 
     // Populate eBPF maps
     for i, lease := range leases {
@@ -1214,9 +1214,9 @@ func (s *BrushtailServer) initializeFromNeelix() error {
     return nil
 }
 
-func (s *BrushtailServer) watchNeelixUpdates() {
+func (s *BrushtailServer) watchNexusUpdates() {
     ctx := context.Background()
-    updates := s.neelix.WatchAllocations(ctx)
+    updates := s.nexus.WatchAllocations(ctx)
 
     for update := range updates {
         mac := update.MAC
@@ -1230,9 +1230,9 @@ func (s *BrushtailServer) watchNeelixUpdates() {
         }
 
         if err := s.subscriberPools.Put(mac, assignment); err != nil {
-            log.Printf("Failed to update eBPF map from Neelix: %v", err)
+            log.Printf("Failed to update eBPF map from Nexus: %v", err)
         } else {
-            log.Printf("Synced allocation from Neelix: MAC=%x IP=%s", mac, update.IP)
+            log.Printf("Synced allocation from Nexus: MAC=%x IP=%s", mac, update.IP)
         }
     }
 }
@@ -1255,8 +1255,8 @@ func (s *BrushtailServer) HandleDHCP(pkt *dhcp.DHCPv4) (*dhcp.DHCPv4, error) {
         return nil, err
     }
 
-    // Allocate IP from Neelix (CRDT)
-    ip, err := s.neelix.AllocateIP(context.Background(), mac, pool.ID)
+    // Allocate IP from Nexus (CRDT)
+    ip, err := s.nexus.AllocateIP(context.Background(), mac, pool.ID)
     if err != nil {
         return nil, err
     }
@@ -1354,12 +1354,12 @@ dhcp_cache_size_bytes
 dhcp_cache_entries_total
 ```
 
-**Neelix Integration:**
+**Nexus Integration:**
 ```
-neelix_sync_events_total{type="allocation"}
-neelix_sync_events_total{type="release"}
-neelix_conflicts_total
-neelix_sync_latency_milliseconds
+nexus_sync_events_total{type="allocation"}
+nexus_sync_events_total{type="release"}
+nexus_conflicts_total
+nexus_sync_latency_milliseconds
 ```
 
 ### Hubble Observability
@@ -1457,7 +1457,7 @@ This architecture demonstrates how eBPF can accelerate ISP DHCP services by **10
 ✅ **Performance**: 50k req/sec, sub-millisecond latency
 ✅ **Scalability**: 100k subscribers per pod
 ✅ **Cost Savings**: $1,950/month per edge location
-✅ **Edge Deployment**: Works with distributed state (Neelix)
+✅ **Edge Deployment**: Works with distributed state (Nexus)
 ✅ **Reliability**: Graceful degradation (eBPF → userspace fallback)
 
 **Key Innovations:**
@@ -1469,7 +1469,7 @@ This architecture demonstrates how eBPF can accelerate ISP DHCP services by **10
 **Next Steps:**
 1. Build PoC (Phase 1)
 2. Integrate with Brushtail (Phase 2)
-3. Connect to Neelix (Phase 3)
+3. Connect to Nexus (Phase 3)
 4. Production validation (Phase 4)
 
 ---
@@ -1479,7 +1479,7 @@ This architecture demonstrates how eBPF can accelerate ISP DHCP services by **10
 - [Cilium eBPF Documentation](https://docs.cilium.io/en/latest/bpf/)
 - [XDP Tutorial](https://github.com/xdp-project/xdp-tutorial)
 - [eBPF Go Library](https://github.com/cilium/ebpf)
-- [Neelix Architecture](../borg/src/cne/neelix/)
+- [Nexus Architecture](../borg/src/cne/nexus/)
 - [Brushtail Source](../borg/src/cne/brushtail/)
 
 ---

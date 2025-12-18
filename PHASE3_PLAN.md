@@ -564,7 +564,7 @@ pkg/
 ├── metrics/
 │   └── prometheus.go     # Metrics definitions
 └── state/
-    └── store.go          # In-memory state (→ Neelix Phase 4)
+    └── store.go          # In-memory state (→ Nexus Phase 4)
 
 cmd/bng/
 ├── main.go               # CLI entry

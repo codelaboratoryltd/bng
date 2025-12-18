@@ -9,7 +9,7 @@ This project explores building a cloud-native Broadband Network Gateway using eB
 ### Key Features
 
 - **eBPF/XDP Fast Path**: Kernel-level DHCP processing for sub-millisecond latency
-- **CRDT State Management**: Distributed state sync via Neelix for multi-region consistency
+- **CRDT State Management**: Distributed state sync via Nexus for multi-region consistency
 - **Kubernetes Native**: Cilium CNI integration, GitOps deployment
 - **10x Performance**: 50k+ DHCP req/sec (vs 5k baseline)
 - **Edge Optimized**: Designed for 10-40 Gbps edge PoPs (not core aggregation)
@@ -43,7 +43,7 @@ See [Architecture Decision section](./ebpf-dhcp-architecture.md#architecture-dec
 - **Kubernetes**: Deployment platform
 - **Cilium**: CNI and observability (Hubble)
 - **NATS**: Distributed messaging
-- **CRDT (Neelix)**: Conflict-free replicated state
+- **CRDT (Nexus)**: Conflict-free replicated state
 
 ## Status
 

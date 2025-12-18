@@ -145,7 +145,7 @@ Development task list for eBPF-accelerated Broadband Network Gateway.
 
 ## Phase 4: Stub State Management (Week 5-6)
 
-**Note:** Neelix/Brushtail integration deferred - use simple stubs for POC
+**Note:** Nexus/Brushtail integration deferred - use simple stubs for POC
 
 ### In-Memory State Store
 
@@ -293,9 +293,9 @@ Development task list for eBPF-accelerated Broadband Network Gateway.
 - [ ] Integration with RADIUS
 - [ ] MAC-based session tracking
 
-### Neelix Integration (CRDT)
+### Nexus Integration (CRDT)
 
-- [ ] Replace stub state store with Neelix client
+- [ ] Replace stub state store with Nexus client
 - [ ] Implement CRDT conflict resolution
 - [ ] Multi-region state sync
 - [ ] Handle network partitions
