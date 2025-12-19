@@ -10,9 +10,8 @@ This document outlines an architecture for accelerating ISP DHCP services using 
 
 **Key Technologies:**
 - eBPF/XDP (kernel-level packet processing)
-- CRDT (Conflict-free Replicated Data Types via Nexus)
+- CLSet/CRDT (Conflict-free Replicated Data Types via Nexus)
 - Kubernetes (cloud-native deployment)
-- NATS (distributed messaging)
 
 **Target Use Case:**
 ISP subscriber IP address allocation at edge locations with multi-region state synchronisation.
@@ -548,7 +547,7 @@ Uplink NIC:     10G or 40G (standard routing)
 │  └──────────────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────────────┘
                           ↕
-                    (NATS/CRDT Sync)
+                    (CLSet Sync)
                           ↕
 ┌───────────────────────────────────────────────────────────┐
 │  Nexus Cluster (Distributed State)                       │
@@ -557,7 +556,7 @@ Uplink NIC:     10G or 40G (standard routing)
 │  - Subscriber → IP mapping                                │
 └───────────────────────────────────────────────────────────┘
                           ↕
-                    (NATS/CRDT Sync)
+                    (CLSet Sync)
                           ↕
 ┌───────────────────────────────────────────────────────────┐
 │  Edge Location B (Kubernetes Cluster)                     │
@@ -587,7 +586,7 @@ Uplink NIC:     10G or 40G (standard routing)
 
 **Step 3: CRDT Synchronisation**
 ```
-11. Nexus broadcasts allocation to other regions (NATS)
+11. Nexus broadcasts allocation to other regions (CLSet)
 12. Nexus instances at other edge locations receive update
 13. Other Brushtail instances update their eBPF maps
 ```
@@ -865,7 +864,7 @@ func (s *DHCPServer) AllocateLease(mac uint64, clientClass string) (net.IP, erro
     }
 
     // 3. Nexus broadcasts allocation to other regions (CRDT)
-    // This happens automatically in Nexus via NATS
+    // This happens automatically in Nexus via CLSet sync
 
     return ip, nil
 }
@@ -935,7 +934,7 @@ Time T1:
   (Both write to local Nexus replica)
 
 Time T2:
-  NATS propagates both allocations
+  CLSet propagates both allocations
   Nexus CRDT detects conflict
 
 Time T3:

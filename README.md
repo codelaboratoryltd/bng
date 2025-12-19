@@ -51,11 +51,11 @@ This project implements a cloud-native Broadband Network Gateway using eBPF/XDP 
 
 | Document | Description |
 |----------|-------------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Complete system architecture with diagrams |
-| [FEATURES.md](./FEATURES.md) | Comprehensive feature specification |
-| [TODO.md](./TODO.md) | Implementation roadmap and task list |
+| [ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Complete system architecture with diagrams |
+| [FEATURES.md](./docs/FEATURES.md) | Comprehensive feature specification |
+| [TODO.md](./docs/TODO.md) | Implementation roadmap and task list |
 | [CLAUDE.md](./CLAUDE.md) | Development guidelines for AI assistance |
-| [ebpf-dhcp-architecture.md](./ebpf-dhcp-architecture.md) | eBPF/XDP DHCP design |
+| [ebpf-dhcp-architecture.md](./docs/ebpf-dhcp-architecture.md) | eBPF/XDP DHCP design |
 
 ## Package Structure
 

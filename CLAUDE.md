@@ -29,7 +29,7 @@ This is an eBPF-accelerated Broadband Network Gateway (BNG) implementation desig
 - **Better observability**: Hubble provides zero-instrumentation network visibility
 - **Cost savings**: Can share K8s nodes with other services (VPP needs dedicated hardware)
 
-See `ebpf-dhcp-architecture.md` for full VPP vs eBPF comparison.
+See `docs/ebpf-dhcp-architecture.md` for full VPP vs eBPF comparison.
 
 ### Two-Tier Design: Fast Path + Slow Path
 
@@ -91,9 +91,11 @@ Go Userspace - SLOW PATH
 bng/
 ├── README.md                     # Project overview
 ├── CLAUDE.md                     # This file
-├── TODO.md                       # Phase-by-phase task list
-├── FEATURES.md                   # Comprehensive feature specification
-├── ebpf-dhcp-architecture.md     # Full architecture document
+├── docs/
+│   ├── TODO.md                   # Phase-by-phase task list
+│   ├── FEATURES.md               # Comprehensive feature specification
+│   ├── ARCHITECTURE.md           # System architecture
+│   └── ebpf-dhcp-architecture.md # Full architecture document
 │
 ├── cmd/
 │   └── bng/                      # Main BNG binary
@@ -187,7 +189,7 @@ tilt up
 
 ### Architecture Documentation
 
-- **`ebpf-dhcp-architecture.md`**: Complete technical design
+- **`docs/ebpf-dhcp-architecture.md`**: Complete technical design
   - Problem statement and current challenges
   - Two-tier fast path/slow path architecture
   - VPP vs eBPF decision analysis with edge performance calculations
@@ -200,7 +202,7 @@ tilt up
 
 ### Planning Documents
 
-- **`TODO.md`**: Phase-by-phase development plan
+- **`docs/TODO.md`**: Phase-by-phase development plan
   - Phase 0: Project setup ✅
   - Phase 1: Local dev environment (k3d, Cilium, Tilt) ← **CURRENT FOCUS**
   - Phase 2: eBPF development toolchain
@@ -211,7 +213,7 @@ tilt up
   - Phase 7: Production readiness
   - Phase 8: Future enhancements (PPPoE, real Nexus integration)
 
-- **`FEATURES.md`**: Comprehensive BNG feature specification
+- **`docs/FEATURES.md`**: Comprehensive BNG feature specification
   - 12 core BNG functions with detailed requirements
   - Performance targets for each feature
   - Configuration examples (YAML schemas)
@@ -220,7 +222,7 @@ tilt up
 
 ## Current Phase: Phase 1 - Local Development Environment
 
-**PRIORITY TASKS** (from TODO.md):
+**PRIORITY TASKS** (from docs/TODO.md):
 
 1. **Create k3d config for Cilium CNI**
    - Disable default Flannel: `--flannel-backend=none`
@@ -354,7 +356,7 @@ ports:
 - eBPF becomes fast path only
 - Leverage Brushtail's RADIUS integration
 
-See `ebpf-dhcp-architecture.md` sections:
+See `docs/ebpf-dhcp-architecture.md` sections:
 - "Integration with Nexus (CRDT)"
 - "Future Enhancements" → "Nexus Integration" and "Brushtail Integration"
 
@@ -599,9 +601,9 @@ hubble observe --protocol dhcp --last 10
 
 ### Internal References
 
-- Architecture doc: `ebpf-dhcp-architecture.md`
-- Task list: `TODO.md`
-- Feature spec: `FEATURES.md`
+- Architecture doc: `docs/ebpf-dhcp-architecture.md`
+- Task list: `docs/TODO.md`
+- Feature spec: `docs/FEATURES.md`
 - Vitrifi Borg repo: `/Users/markgascoyne/go/src/gitlab.com/vitrifi/borg`
   - Brushtail DHCP: `src/cne/brushtail/`
   - Nexus CRDT: `src/shared/nexus/`
@@ -643,9 +645,9 @@ This project was created to:
 ### Documentation
 
 1. Start with `README.md` for project overview
-2. Read `ebpf-dhcp-architecture.md` for technical deep dive
-3. Check `TODO.md` for current phase and tasks
-4. Review `FEATURES.md` for feature requirements
+2. Read `docs/ebpf-dhcp-architecture.md` for technical deep dive
+3. Check `docs/TODO.md` for current phase and tasks
+4. Review `docs/FEATURES.md` for feature requirements
 
 ### Debugging
 
