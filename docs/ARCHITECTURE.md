@@ -582,40 +582,261 @@ BACKHAUL FIBER (OLT → Aggregation)
 
 ## Subscriber Flows
 
-### New Subscriber Connection
+### Complete ZTP Flow: ONT Installation to Internet Access
+
+This is the full zero-touch provisioning flow from physical installation to customer internet access.
+
+#### Phase 1: ONT Discovery (New ONT Connected)
 
 ```
-1. ONT CONNECTS TO PON
-   └── PON Manager detects new ONU
-
-2. NTE DISCOVERY
-   ├── Read ONU serial via OMCI
-   ├── Store in CLSet: /discovery/{device}/ntes/{serial}
-   └── Known? → Load config, Unknown? → Walled Garden
-
-3. VLAN ALLOCATION (NetCo)
-   ├── Allocate S-TAG:C-TAG
-   └── Configure ONU port
-
-4. DHCP REQUEST
-   ├── Lookup subscriber → get ispco_id
-   └── Route to ISP handling
-
-5. RADIUS AUTH (ISP-specific)
-   ├── Load ISP config
-   ├── Send to ISP's RADIUS
-   └── Get Accept + attributes
-
-6. IP ALLOCATION (ISP pool)
-   ├── Allocate from ISP's range
-   └── Store in CLSet
-
-7. SESSION ESTABLISHMENT
-   ├── Update CLSet
-   ├── Program eBPF maps
-   ├── Send DHCP Ack
-   └── RADIUS Accounting-Start
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. TECHNICIAN INSTALLS ONT AT CUSTOMER PREMISES                              │
+│                                                                              │
+│    - Fiber patched to ONT                                                   │
+│    - ONT powered on                                                          │
+│    - ONT sends PLOAM upstream to OLT                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 2. OLT-BNG DETECTS NEW ONT                                                   │
+│                                                                              │
+│    PON Manager detects ONU via OMCI/PLOAM                                   │
+│    Reads ONT serial number: "ADTN-12345678"                                 │
+│                                                                              │
+│    Stores discovery event in CLSet:                                          │
+│    /discovery/{device-id}/ntes/ADTN-12345678/                               │
+│    {                                                                         │
+│      "port": "1/1/3",                                                       │
+│      "status": "discovered",                                                │
+│      "vendor": "ADTRAN",                                                    │
+│      "model": "SDX-621",                                                    │
+│      "first_seen": "2025-12-19T10:30:00Z"                                   │
+│    }                                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 3. OLT-BNG CHECKS IF ONT IS KNOWN                                            │
+│                                                                              │
+│    Lookup in local Nexus cache:                                             │
+│    /subscribers/*/nte_id == "ADTN-12345678"                                 │
+│                                                                              │
+│    Result: NOT FOUND (new installation)                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 4. ONT PROVISIONED TO WALLED GARDEN                                          │
+│                                                                              │
+│    OLT-BNG auto-provisions ONT:                                             │
+│    - Allocates temporary S-TAG:C-TAG (e.g., 4000:100)                       │
+│    - Configures ONT port via OMCI                                           │
+│    - Adds MAC to walled garden eBPF map                                     │
+│                                                                              │
+│    Walled Garden allows:                                                     │
+│    - DNS (to resolve captive portal)                                        │
+│    - DHCP (to get walled garden IP)                                         │
+│    - HTTP/HTTPS to activation portal only                                   │
+│    - Everything else blocked/redirected                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+#### Phase 2: Customer Gets Walled Garden Access
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 5. CUSTOMER DEVICE SENDS DHCP DISCOVER                                       │
+│                                                                              │
+│    Customer plugs in router/device                                          │
+│    Device broadcasts DHCP DISCOVER                                          │
+│                                                                              │
+│    eBPF/XDP receives packet:                                                │
+│    - Lookup MAC in subscriber map → MISS                                    │
+│    - Check walled garden map → HIT (MAC is in WGAR)                         │
+│    - Pass to userspace (slow path)                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 6. DHCP SERVER ASSIGNS WALLED GARDEN IP                                      │
+│                                                                              │
+│    Userspace DHCP server:                                                   │
+│    - Sees MAC is in walled garden state                                     │
+│    - Allocates IP from WGAR pool: 10.255.1.50                               │
+│    - Short lease time (10 minutes)                                          │
+│    - DNS points to captive portal resolver                                  │
+│                                                                              │
+│    Customer device now has IP: 10.255.1.50                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 7. CUSTOMER REDIRECTED TO CAPTIVE PORTAL                                     │
+│                                                                              │
+│    Customer opens browser → http://google.com                               │
+│                                                                              │
+│    eBPF walled garden rules:                                                │
+│    - HTTP request intercepted                                               │
+│    - Redirected to: https://activate.netco.example/                         │
+│                                                                              │
+│    Customer sees activation portal:                                          │
+│    ┌─────────────────────────────────────────────────┐                      │
+│    │  Welcome! Your connection is ready.             │                      │
+│    │                                                 │                      │
+│    │  Choose your Internet provider:                 │                      │
+│    │  ○ ISP-A  (100Mbps from $49/mo)                │                      │
+│    │  ○ ISP-B  (500Mbps from $79/mo)                │                      │
+│    │  ○ ISP-C  (1Gbps from $99/mo)                  │                      │
+│    │                                                 │                      │
+│    │  [Sign Up Now]                                  │                      │
+│    └─────────────────────────────────────────────────┘                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Phase 3: Customer Signs Up with ISP
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 8. CUSTOMER COMPLETES SIGN-UP                                                │
+│                                                                              │
+│    Customer selects ISP-A, enters payment details                           │
+│    ISP-A's BSS/OSS creates subscriber record                                │
+│                                                                              │
+│    ISP-A provisions subscriber via Nexus API:                               │
+│    POST /api/v1/subscribers                                                 │
+│    {                                                                         │
+│      "subscriber_id": "SUB-2024-999",                                       │
+│      "nte_id": "ADTN-12345678",           ← Links to discovered ONT        │
+│      "ispco_id": "ISP-A",                                                   │
+│      "service_tier": "residential-100",                                     │
+│      "qos_download": 100000000,           ← 100 Mbps                        │
+│      "qos_upload": 20000000               ← 20 Mbps                         │
+│    }                                                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 9. SUBSCRIBER RECORD SYNCS VIA CLSET                                         │
+│                                                                              │
+│    Nexus Server receives new subscriber                                      │
+│    CLSet propagates to all OLT-BNGs                                         │
+│                                                                              │
+│    OLT-BNG receives sync:                                                    │
+│    - Matches nte_id to discovered ONT                                        │
+│    - Updates local cache                                                     │
+│    - ONT now has associated subscriber                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Phase 4: RADIUS Authentication & IP Allocation
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 10. OLT-BNG TRIGGERS AUTHENTICATION                                          │
+│                                                                              │
+│    OLT-BNG sees subscriber now provisioned                                  │
+│    Initiates RADIUS Access-Request to ISP-A:                                │
+│                                                                              │
+│    RADIUS Access-Request:                                                   │
+│    - User-Name: "ADTN-12345678@ispa.com"                                   │
+│    - NAS-Identifier: "OLT-2024-ABC123"                                      │
+│    - NAS-Port-Id: "1/1/3"                                                   │
+│    - Calling-Station-Id: "aa:bb:cc:dd:ee:ff" (CPE MAC)                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 11. ISP-A RADIUS AUTHENTICATES                                               │
+│                                                                              │
+│    ISP-A RADIUS server:                                                     │
+│    - Validates subscriber exists and is active                              │
+│    - Checks payment status: OK                                              │
+│                                                                              │
+│    RADIUS Access-Accept:                                                    │
+│    - Framed-Pool: "ispa-residential"                                        │
+│    - Filter-Id: "100M-down-20M-up"                                          │
+│    - Session-Timeout: 86400                                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 12. IP ALLOCATED FROM HASHRING (at RADIUS time)                              │
+│                                                                              │
+│    OLT-BNG allocates IP from ISP-A's pool via Nexus hashring:              │
+│                                                                              │
+│    Hashring lookup:                                                          │
+│    - Pool: "ispa-residential" (100.64.0.0/22)                               │
+│    - Subscriber hash position → deterministic IP                            │
+│    - IP allocated: 100.64.1.42                                              │
+│                                                                              │
+│    Subscriber record updated in CLSet:                                       │
+│    /subscribers/SUB-2024-999/                                               │
+│    {                                                                         │
+│      "ipv4": "100.64.1.42",           ← IP now assigned                    │
+│      "session_state": "authenticated",                                       │
+│      "authenticated_at": "2025-12-19T10:35:00Z"                             │
+│    }                                                                         │
+│                                                                              │
+│    eBPF maps updated:                                                        │
+│    - subscriber_pools[MAC] = { ip: 100.64.1.42, pool: ispa-res, ... }       │
+│    - MAC removed from walled garden map                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Phase 5: Customer Gets Real IP & Internet Access
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 13. DHCP LEASE EXPIRES / RENEW TRIGGERED                                     │
+│                                                                              │
+│    Walled garden lease was short (10 min)                                   │
+│    Customer device sends DHCP DISCOVER/REQUEST                              │
+│                                                                              │
+│    eBPF/XDP receives packet:                                                │
+│    - Lookup MAC in subscriber map → HIT!                                    │
+│    - Pre-allocated IP found: 100.64.1.42                                    │
+│    - Generate DHCP OFFER/ACK in kernel (FAST PATH)                          │
+│    - Return XDP_TX                                                           │
+│                                                                              │
+│    Latency: ~10 microseconds                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 14. CUSTOMER HAS INTERNET ACCESS                                             │
+│                                                                              │
+│    Customer device now has:                                                  │
+│    - IP: 100.64.1.42                                                        │
+│    - Gateway: 100.64.0.1 (OLT-BNG)                                          │
+│    - DNS: ISP-A's DNS servers                                               │
+│                                                                              │
+│    Traffic flow (LOCAL - no central BNG):                                   │
+│    Customer → ONT → OLT-BNG → Policy Routing → ISP-A PE → Internet         │
+│                                    │                                         │
+│                                    └── ip rule: from 100.64.1.42 table 100  │
+│                                        table 100: default via ISP-A PE      │
+│                                                                              │
+│    QoS applied via eBPF: 100 Mbps down, 20 Mbps up                          │
+│    RADIUS Accounting-Start sent to ISP-A                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Summary: What Happens Where
+
+| Action | Location | Central Involved? |
+|--------|----------|-------------------|
+| ONT detection | OLT-BNG (local) | No |
+| Walled garden | OLT-BNG (local) | No |
+| Customer sign-up | ISP portal → Nexus | Yes (config sync) |
+| RADIUS auth | OLT-BNG → ISP RADIUS | Yes (ISP's RADIUS) |
+| IP allocation | Nexus hashring | Yes (at RADIUS time) |
+| DHCP delivery | OLT-BNG (local eBPF) | No |
+| Traffic routing | OLT-BNG → ISP (BGP) | No |
+| QoS enforcement | OLT-BNG (local eBPF) | No |
+
+**Key Point**: Subscriber traffic NEVER flows through central infrastructure. Only control plane
+operations (config sync, RADIUS auth, monitoring) involve central services.
 
 ### ISP Churn
 
