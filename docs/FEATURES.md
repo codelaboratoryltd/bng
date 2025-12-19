@@ -33,32 +33,33 @@ Comprehensive feature list for eBPF-accelerated Broadband Network Gateway.
 
 ### 2. DHCP Server (DHCPv4)
 
-**Purpose**: Allocate IP addresses to subscribers.
+**Purpose**: Deliver pre-allocated IP addresses to subscribers.
+
+**Important**: IP allocation happens at RADIUS time using hashring, NOT during DHCP. DHCP is a read-only operation.
 
 **Requirements**:
 
 #### Fast Path (eBPF/XDP):
-- DHCP DISCOVER → OFFER (cached subscribers)
+- DHCP DISCOVER → OFFER (lookup pre-allocated IP from eBPF map)
 - DHCP REQUEST → ACK (cached leases)
 - Lease renewal (in-kernel, no userspace)
 - Packet validation and sanitization
-- Cache hit rate: >80%
+- Cache hit rate: >95%
 
 #### Slow Path (Userspace):
-- New subscriber IP allocation
-- Client classification (residential, business, static IP)
-- Pool selection based on client class
+- Lookup subscriber's pre-allocated IP from Nexus (read-only)
+- NO allocation logic - IP already assigned at RADIUS time
+- Update eBPF cache for future fast path hits
 - DHCP RELEASE handling
 - DHCP DECLINE handling
-- Lease expiry and cleanup
-- Static IP assignment
+- Lease expiry tracking (for cache cleanup)
 - DHCP relay support (Option 82)
 
-#### IP Pool Management:
-- Multiple IP pools (per client class, per service tier)
+#### IP Pool Management (at RADIUS/Nexus level):
+- Hashring-based allocation (deterministic, no conflicts)
+- Multiple IP pools (per ISP, per service tier)
 - Pool utilization monitoring
-- Dynamic pool expansion
-- IP address reservation
+- IP address reservation (static IPs)
 - Pool exhaustion alerts
 
 **Performance Targets**:

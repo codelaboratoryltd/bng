@@ -122,14 +122,16 @@ func (s *StubAuth) Authenticate(ontSerial string) (*AuthResponse, error) {
 
 ### 3. DHCP Server (`pkg/dhcp/`)
 
-**Purpose**: IP allocation with pool selection based on subscriber state
+**Purpose**: Deliver pre-allocated IP addresses to subscribers (READ-ONLY)
+
+**Important**: IP allocation happens at RADIUS time using hashring, NOT during DHCP.
 
 **Files:**
 - `pkg/dhcp/server.go` - DHCP server
-- `pkg/dhcp/pools.go` - Pool management
+- `pkg/dhcp/pools.go` - Pool metadata (gateway, DNS, lease time)
 - `pkg/dhcp/lease.go` - Lease tracking
 
-**Pools:**
+**Pools (metadata only - allocation is at RADIUS/Nexus level):**
 ```yaml
 pools:
   - name: wgar
@@ -151,37 +153,42 @@ pools:
     lease_time: 604800s  # 7 days
 ```
 
-**Flow:**
+**Flow (DHCP is read-only - IP already allocated at RADIUS time):**
 ```go
 func (d *DHCPServer) HandleDISCOVER(pkt *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
     // 1. Extract MAC, Option 82 (Circuit-ID)
     mac := pkt.ClientHWAddr
     circuitID := extractCircuitID(pkt)  // "agg-01|1/1/1"
 
-    // 2. Lookup ONT serial from Circuit-ID (from OLT events)
-    ontSerial := d.olt.GetONTByCircuit(circuitID)
+    // 2. Lookup subscriber from Nexus (IP already allocated at RADIUS time)
+    subscriber, err := d.nexus.GetSubscriberByMAC(mac)
+    if err != nil {
+        // Unknown subscriber - send to walled garden
+        return d.handleWalledGarden(pkt)
+    }
 
-    // 3. RADIUS auth → get pool
-    authResp, _ := d.auth.Authenticate(ontSerial)
-    poolName := authResp.FramedPool
+    // 3. Get pre-allocated IP (NO allocation here - just a read!)
+    ip := subscriber.AllocatedIP
+    if ip == nil {
+        // Subscriber authenticated but no IP yet - RADIUS not complete
+        return nil, errors.New("subscriber has no allocated IP")
+    }
 
-    // 4. Allocate IP from pool
-    ip, _ := d.pools.Allocate(poolName, mac)
+    // 4. Get pool metadata for DHCP options
+    pool := d.pools.Get(subscriber.PoolName)
 
-    // 5. Create lease
+    // 5. Create/update lease tracking
     lease := &Lease{
         MAC:       mac,
         IP:        ip,
-        ONTSerial: ontSerial,
-        Pool:      poolName,
+        ONTSerial: subscriber.ONTSerial,
+        Pool:      subscriber.PoolName,
         CircuitID: circuitID,
         ExpiresAt: time.Now().Add(pool.LeaseTime),
     }
+    d.leases.Update(lease)
 
-    // 6. RADIUS Accounting-Start
-    d.accounting.SessionStart(lease)
-
-    // 7. Generate DHCP OFFER
+    // 6. Generate DHCP OFFER with pre-allocated IP
     return generateOffer(pkt, ip, pool), nil
 }
 ```

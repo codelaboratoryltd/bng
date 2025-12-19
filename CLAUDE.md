@@ -4,19 +4,46 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This is an eBPF-accelerated Broadband Network Gateway (BNG) implementation designed for Kubernetes edge deployments. The project targets ISP edge locations serving 1,000-2,000 subscribers with 10-40 Gbps uplink capacity.
+This is an eBPF-accelerated Broadband Network Gateway (BNG) implementation designed for **bare metal deployment on OLT hardware** at ISP edge locations. Each OLT-BNG serves 1,000-2,000 subscribers with 10-40 Gbps uplink capacity.
 
 **Status**: Design phase, implementation starting
 
-**Key Innovation**: Using eBPF/XDP for DHCP fast path instead of traditional userspace processing or VPP, achieving 10x performance improvement while maintaining cloud-native Kubernetes integration.
+**Key Innovation**: Using eBPF/XDP for DHCP fast path instead of traditional userspace processing or VPP, achieving 10x performance improvement. The BNG runs directly on OLT hardware as a systemd service, eliminating dedicated BNG appliances.
+
+## Architecture Overview
+
+```
+PRODUCTION (Bare Metal):
+┌─────────────────────────────────────────────────────────────┐
+│  Central Coordination (Kubernetes)                          │
+│  ├── Nexus Server (CLSet CRDT, bootstrap API)              │
+│  ├── Prometheus/Grafana (monitoring)                        │
+│  └── Image Registry (OLT-BNG updates)                       │
+└─────────────────────────────────────────────────────────────┘
+        │ Control Plane Only (no subscriber traffic)
+        ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│ OLT-BNG Site 1  │  │ OLT-BNG Site 2  │  │ OLT-BNG Site N  │
+│ (Bare Metal)    │  │ (Bare Metal)    │  │ (Bare Metal)    │
+│ systemd service │  │ systemd service │  │ systemd service │
+└─────────────────┘  └─────────────────┘  └─────────────────┘
+        │                    │                    │
+   Subscriber Traffic   Subscriber Traffic   Subscriber Traffic
+   (stays local)        (stays local)        (stays local)
+
+DEVELOPMENT (Kubernetes/k3d):
+- k3d cluster with Cilium for testing
+- Tilt for hot reload
+- NOT production architecture
+```
 
 ## Project Goals
 
 1. **DHCP Acceleration**: 50,000+ req/sec (vs 5,000 baseline) with sub-millisecond latency
-2. **Cloud-Native**: Native Kubernetes integration via Cilium CNI and Hubble observability
+2. **Distributed Edge**: No central BNG - subscriber traffic stays local to OLT
 3. **Edge-Optimized**: Designed for 10-40 Gbps edge scale (not 100+ Gbps core)
-4. **Cost-Effective**: Shared infrastructure, no dedicated hardware required
-5. **Proof of Concept**: Validate eBPF approach before production deployment
+4. **Zero-Touch Provisioning**: OLTs self-register and pull config from central Nexus
+5. **Offline-First**: Edge sites continue operating during network partitions
 
 ## Architecture Approach
 
@@ -24,50 +51,61 @@ This is an eBPF-accelerated Broadband Network Gateway (BNG) implementation desig
 
 **We chose eBPF/XDP over VPP for edge deployment** because:
 - **Performance sufficient**: 10-40 Gbps covers edge scale (VPP's 100+ Gbps is overkill)
-- **K8s integration**: Cilium CNI provides native integration (VPP requires privileged pods)
 - **Simpler operations**: No DPDK, hugepages, or NIC binding (VPP requires all these)
-- **Better observability**: Hubble provides zero-instrumentation network visibility
-- **Cost savings**: Can share K8s nodes with other services (VPP needs dedicated hardware)
+- **Standard Linux**: Runs as systemd service on any modern Linux kernel
+- **Better debugging**: Standard Linux tools (tcpdump, bpftool, perf)
 
 See `docs/ebpf-dhcp-architecture.md` for full VPP vs eBPF comparison.
 
 ### Two-Tier Design: Fast Path + Slow Path
 
+**Important**: IP allocation happens at RADIUS time (hashring-based), NOT during DHCP. DHCP is read-only.
+
 ```
-DHCP Request
+RADIUS Authentication (happens first)
     ↓
-eBPF/XDP (Kernel) - FAST PATH
-  • Cached subscribers (80% of traffic)
+  • Subscriber authenticates
+  • Nexus allocates IP from hashring (deterministic, no conflicts)
+  • IP stored in subscriber record
+    ↓
+DHCP Request (IP already allocated)
+    ↓
+eBPF/XDP (Kernel) - FAST PATH (95%+ of traffic)
+  • Lookup MAC in eBPF map
+  • Return pre-allocated IP
   • Reply in kernel (~10 μs latency)
   • NO USERSPACE!
-    ↓ (cache miss)
-Go Userspace - SLOW PATH
-  • New allocations (20% of traffic)
-  • Client classification
-  • State store integration
-  • Update eBPF cache
+    ↓ (cache miss - rare)
+Go Userspace - SLOW PATH (<5% of traffic)
+  • Query Nexus for subscriber's pre-allocated IP
+  • NO allocation logic - just a read
+  • Update eBPF cache for future requests
 ```
 
 **Performance Target**: 50,000+ DHCP req/sec, <100μs P99 latency (fast path)
 
 ## Technology Stack
 
-### Core Technologies
+### Production (OLT-BNG - Bare Metal)
 
 - **eBPF/XDP**: Kernel packet processing (bpf/*.c)
 - **Go**: Userspace control plane (cmd/, pkg/)
-- **Cilium**: Kubernetes CNI and network observability
-- **Hubble**: Zero-instrumentation observability
-- **Kubernetes**: Deployment platform (k3d for local dev)
-- **Prometheus**: Metrics collection
-- **Grafana**: Dashboards
+- **FRR**: BGP/routing daemon
+- **systemd**: Service management
+- **Prometheus**: Metrics (scraped by central)
 
-### Development Tools
+### Production (Central Coordination - Kubernetes)
+
+- **Nexus Server**: CLSet CRDT, bootstrap API, config distribution
+- **Prometheus/Grafana**: Central monitoring
+- **Image Registry**: OLT-BNG binary/image distribution
+
+### Development Tools (Local Testing)
 
 - **Tilt**: Local development orchestration
-- **k3d**: Local Kubernetes cluster with Cilium
+- **k3d**: Local Kubernetes cluster for testing
+- **Cilium/Hubble**: Network observability in dev
 - **helmfile**: Helm chart management
-- **hydrate**: Helmfile template generation
 - **Kustomize**: Kubernetes manifest overlays
 
 ### Dependencies (Go)
@@ -280,32 +318,31 @@ options:
 
 **Then install Cilium via helmfile** after cluster creation.
 
-## BNG-Specific Kubernetes Considerations
+## Development Environment (k3d/Kubernetes)
 
-### eBPF Program Deployment
+**Note**: This section is for LOCAL DEVELOPMENT only. Production OLT-BNG runs on bare metal Linux.
 
-eBPF programs require:
-- **Host network access**: To attach XDP to physical NICs
-- **CAP_BPF + CAP_NET_ADMIN**: Kubernetes security context
-- **Pinned BPF filesystem**: `/sys/fs/bpf` mounted in pod
+### eBPF Program Deployment (Dev)
 
-Example pod spec:
+For testing eBPF in k3d, pods require:
+- **Host network access**: To attach XDP to NICs
+- **CAP_BPF + CAP_NET_ADMIN**: Security context
+- **Pinned BPF filesystem**: `/sys/fs/bpf` mounted
+
+Example pod spec (dev only):
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
   name: bng
 spec:
-  hostNetwork: true  # Access host NICs
+  hostNetwork: true
   containers:
   - name: bng
     image: ghcr.io/codelaboratoryltd/bng:latest
     securityContext:
       capabilities:
-        add:
-          - BPF
-          - NET_ADMIN
-          - SYS_RESOURCE
+        add: [BPF, NET_ADMIN, SYS_RESOURCE]
     volumeMounts:
     - name: bpffs
       mountPath: /sys/fs/bpf
@@ -313,45 +350,61 @@ spec:
   - name: bpffs
     hostPath:
       path: /sys/fs/bpf
-      type: Directory
 ```
 
-### DHCP Port Requirements
+### DHCP Port Requirements (Dev)
 
-DHCP server needs:
-- UDP port 67 (server)
-- UDP port 68 (client)
-
-In k3d, expose these via port mappings:
+In k3d, expose DHCP ports:
 ```yaml
 ports:
-  - port: 67:67/udp
-    nodeFilters:
-      - server:*
-  - port: 68:68/udp
-    nodeFilters:
-      - server:*
+  - port: 6767:67/udp  # Host 6767 → Container 67
+  - port: 6768:68/udp
+```
+
+### Production Deployment
+
+In production, OLT-BNG runs as a systemd service:
+```bash
+# /etc/systemd/system/olt-bng.service
+[Unit]
+Description=OLT-BNG Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/olt-bng run --config /etc/olt-bng/config.yaml
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 ## State Management Strategy
 
+### IP Allocation Model
+
+**IP allocation happens at RADIUS time**, not DHCP time:
+1. Subscriber authenticates via RADIUS
+2. Nexus allocates IP from hashring (deterministic, no conflicts)
+3. DHCP is just a read operation (lookup pre-allocated IP)
+4. Leases are essentially static after initial allocation
+
 ### POC Phase (Current)
 
-**Simple in-memory state store** (`pkg/state/`):
-- No external state sync integration yet
-- In-memory subscriber database
-- BoltDB/SQLite for persistence (optional)
+**Simple in-memory state store** (`pkg/nexus/`):
+- In-memory subscriber database with CLSet-ready interface
+- Local cache for offline operation
 - Focus on proving eBPF fast path works
 
-### Future (Post-POC)
+### Production (Post-POC)
 
 **CLSet CRDT Backend**:
-- Replace in-memory store with CLSet client
+- Full CLSet integration for distributed state
 - Multi-region state synchronization
-- Conflict resolution via CRDT
+- Hashring-based IP allocation (no conflicts)
 - Session roaming support
 
-See `docs/ebpf-dhcp-architecture.md` for full integration details.
+See `docs/ebpf-dhcp-architecture.md` and `docs/ARCHITECTURE.md` for full details.
 
 ## Performance Targets and Metrics
 

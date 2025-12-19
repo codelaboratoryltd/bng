@@ -533,10 +533,10 @@ Uplink NIC:     10G or 40G (standard routing)
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│  Edge Location A (Kubernetes Cluster)                     │
+│  Edge Site A (OLT-BNG on Bare Metal)                      │
 │                                                            │
 │  ┌──────────────────────────────────────────────────┐    │
-│  │ DHCP Server Pod                                     │    │
+│  │ OLT-BNG Process (systemd service)                 │    │
 │  │                                                    │    │
 │  │  ┌──────────────────────────────────────────┐    │    │
 │  │  │ eBPF/XDP Programs (Kernel)               │    │    │
@@ -546,24 +546,23 @@ Uplink NIC:     10G or 40G (standard routing)
 │  │                    ↕                               │    │
 │  │  ┌──────────────────────────────────────────┐    │    │
 │  │  │ Userspace (Go)                           │    │    │
-│  │  │ - Client classification                  │    │    │
-│  │  │ - Complex allocation logic               │    │    │
+│  │  │ - DHCP slow path (read-only lookup)      │    │    │
 │  │  │ - eBPF map management                    │    │    │
-│  │  │ - Nexus integration                     │    │    │
+│  │  │ - Nexus client (local cache)            │    │    │
 │  │  └──────────────────────────────────────────┘    │    │
 │  └──────────────────────────────────────────────────┘    │
 │                          ↕                                 │
 │  ┌──────────────────────────────────────────────────┐    │
-│  │ Nexus (Local instance)                          │    │
-│  │ - Local CRDT replica                             │    │
-│  │ - Stores IP allocations                          │    │
+│  │ Nexus Agent (Local CLSet replica)               │    │
+│  │ - Local cache for offline operation              │    │
+│  │ - Subscriber → IP mapping                        │    │
 │  └──────────────────────────────────────────────────┘    │
 └───────────────────────────────────────────────────────────┘
                           ↕
                     (CLSet Sync)
                           ↕
 ┌───────────────────────────────────────────────────────────┐
-│  Nexus Cluster (Distributed State)                       │
+│  Nexus Cluster (Central Coordination - Kubernetes)       │
 │  - Multi-region CRDT consensus                            │
 │  - Hashring-based IP allocation (at RADIUS time)          │
 │  - Subscriber → IP mapping (read-only for DHCP)           │
@@ -572,8 +571,8 @@ Uplink NIC:     10G or 40G (standard routing)
                     (CLSet Sync)
                           ↕
 ┌───────────────────────────────────────────────────────────┐
-│  Edge Location B (Kubernetes Cluster)                     │
-│  [Same structure as Location A]                           │
+│  Edge Site B (OLT-BNG on Bare Metal)                      │
+│  [Same structure as Site A]                               │
 └───────────────────────────────────────────────────────────┘
 ```
 

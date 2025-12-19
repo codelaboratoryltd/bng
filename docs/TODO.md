@@ -295,10 +295,10 @@ Development task list for eBPF-accelerated Broadband Network Gateway.
 
 ### Nexus Integration (CRDT)
 
-- [ ] Replace stub state store with Nexus client
-- [ ] Implement CRDT conflict resolution
+- [ ] Replace stub state store with full CLSet client
+- [ ] Hashring-based IP allocation (at RADIUS time)
 - [ ] Multi-region state sync
-- [ ] Handle network partitions
+- [ ] Handle network partitions (offline-first operation)
 
 ### Advanced Features
 

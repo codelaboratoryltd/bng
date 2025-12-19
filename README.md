@@ -9,12 +9,48 @@ This project implements a cloud-native Broadband Network Gateway using eBPF/XDP 
 ### Key Features
 
 - **eBPF/XDP Fast Path**: Kernel-level packet processing for sub-millisecond latency
-- **State Management**: In-memory store with CRDT-ready interface (CLSet integration planned)
-- **Edge-Native**: Runs directly on OLT hardware (bare metal Linux)
+- **No Central BNG**: Subscriber traffic stays local - no hairpinning through central infrastructure
+- **Edge-Native**: Runs directly on OLT hardware (bare metal Linux, systemd service)
 - **Multi-ISP Support**: Policy-based routing with per-ISP routing tables
-- **Zero-Touch Provisioning**: OLTs self-register and auto-configure
+- **Zero-Touch Provisioning**: OLTs self-register and pull config from central Nexus
 - **Offline-First**: Edge sites continue operating during network partitions
 - **Structural Separation**: Supports NetCo/ISPCo model with subscriber portability
+
+### Central Coordination vs Distributed Data Plane
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  CENTRAL (Kubernetes cluster at NOC/POP)                                 │
+│  Control plane only - NO subscriber traffic                              │
+│                                                                          │
+│  ├── Nexus Server: CLSet CRDT, config distribution, bootstrap API       │
+│  ├── Prometheus/Grafana: Monitoring dashboards                          │
+│  ├── Image Registry: OLT-BNG binary updates                             │
+│  └── ISP RADIUS: Authentication (can also be ISP-hosted)                │
+└──────────────────────────────────────┬──────────────────────────────────┘
+                                       │ Config sync, metrics, bootstrap
+                                       │ (NOT subscriber traffic!)
+         ┌─────────────────────────────┼─────────────────────────────┐
+         ▼                             ▼                             ▼
+┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
+│  OLT-BNG #1     │          │  OLT-BNG #2     │          │  OLT-BNG #N     │
+│  (Bare Metal)   │          │  (Bare Metal)   │          │  (Bare Metal)   │
+│                 │          │                 │          │                 │
+│  Subscriber     │          │  Subscriber     │          │  Subscriber     │
+│  traffic LOCAL  │          │  traffic LOCAL  │          │  traffic LOCAL  │
+└────────┬────────┘          └────────┬────────┘          └────────┬────────┘
+         │                            │                            │
+         ▼                            ▼                            ▼
+    Direct to ISP              Direct to ISP              Direct to ISP
+    (via BGP/routing)          (via BGP/routing)          (via BGP/routing)
+```
+
+**Key Point**: Unlike traditional BNG where all subscriber traffic flows through a central device,
+OLT-BNG handles traffic locally. Central coordination is ONLY for:
+- Zero-touch provisioning (bootstrap)
+- Configuration distribution (CLSet sync)
+- IP allocation (hashring at RADIUS time)
+- Monitoring and logging
 
 ## Architecture
 
