@@ -838,27 +838,249 @@ This is the full zero-touch provisioning flow from physical installation to cust
 **Key Point**: Subscriber traffic NEVER flows through central infrastructure. Only control plane
 operations (config sync, RADIUS auth, monitoring) involve central services.
 
-### ISP Churn
+### Session Termination: Graceful Disconnect
+
+When a customer powers off their router or the DHCP lease expires:
 
 ```
-1. DETECT CHANGE
-   └── CLSet watch: ispco_id changed
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. DHCP LEASE EXPIRES                                                        │
+│                                                                              │
+│    - Lease timer (24h) expires with no renewal                              │
+│    - OLT-BNG lease manager detects expiry                                   │
+│                                                                              │
+│ 2. SESSION CLEANUP (Local)                                                   │
+│                                                                              │
+│    - Remove from eBPF subscriber_pools map                                  │
+│    - Remove NAT state (active translations)                                 │
+│    - Remove QoS token bucket                                                │
+│    - Remove anti-spoof binding                                              │
+│                                                                              │
+│ 3. RADIUS ACCOUNTING-STOP                                                    │
+│                                                                              │
+│    Accounting-Stop to ISP:                                                  │
+│    - Acct-Session-Time: 86400 (seconds online)                             │
+│    - Acct-Input-Octets: 50000000000 (downloaded)                            │
+│    - Acct-Output-Octets: 5000000000 (uploaded)                              │
+│    - Acct-Terminate-Cause: Lost-Carrier                                     │
+│                                                                              │
+│ 4. IP RELEASED                                                               │
+│                                                                              │
+│    - IP marked as "recently used" in hashring                               │
+│    - Quarantine period before reuse (e.g., 24h)                             │
+│    - Prevents IP reuse issues, helps logging                                │
+│                                                                              │
+│ 5. CLSET UPDATE                                                              │
+│                                                                              │
+│    /subscribers/SUB-2024-999/ { session_state: "disconnected", ipv4: null } │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
 
-2. TEARDOWN OLD SESSION
-   ├── RADIUS Accounting-Stop to old ISP
-   ├── Release old IP allocation
-   ├── Clear eBPF maps
-   └── Disconnect CPE
+### Session Termination: Administrative Disconnect
 
-3. ESTABLISH NEW SESSION
-   ├── CPE sends new DHCP
-   ├── Route RADIUS to new ISP
-   ├── Allocate from new ISP pool
-   ├── Apply new QoS policy
-   └── Subscriber online with new ISP
+When an ISP suspends service (non-payment, abuse, etc.):
 
-NOTE: Physical layer unchanged!
-      Same ONT, same port, same VLAN
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. ISP UPDATES SUBSCRIBER STATE                                              │
+│                                                                              │
+│    ISP calls Nexus API:                                                     │
+│    PATCH /api/v1/subscribers/SUB-2024-999                                   │
+│    { "status": "suspended", "action": "walled_garden" }                     │
+│                                                                              │
+│ 2. CLSET SYNCS TO OLT-BNG                                                    │
+│                                                                              │
+│    OLT-BNG receives subscriber update                                       │
+│    Triggers disconnect/suspend action                                       │
+│                                                                              │
+│ 3. ACTIVE SESSION MODIFIED                                                   │
+│                                                                              │
+│    Option A: Hard disconnect                                                │
+│    - Remove from eBPF maps immediately                                      │
+│    - Next DHCP gets no response (or NAK)                                    │
+│                                                                              │
+│    Option B: Move to Walled Garden (preferred)                              │
+│    - Update eBPF: move MAC to walled garden                                │
+│    - Customer redirected to "Please pay your bill" page                     │
+│    - Can pay online and restore service                                     │
+│                                                                              │
+│ 4. RADIUS ACCOUNTING-STOP                                                    │
+│                                                                              │
+│    - Acct-Terminate-Cause: Admin-Reset                                      │
+│                                                                              │
+│ ALTERNATIVE: RADIUS CoA (Change of Authorization)                           │
+│    ISP can send CoA directly to OLT-BNG instead of via Nexus               │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### ISP Churn (Customer Switches Provider)
+
+Physical layer unchanged - same ONT, same port, same fiber:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. CUSTOMER SIGNS UP WITH ISP-B                                              │
+│                                                                              │
+│    - Customer visits ISP-B, selects plan                                    │
+│    - ISP-B: "This address has service with ISP-A"                           │
+│    - Customer confirms switch                                               │
+│                                                                              │
+│ 2. ISP-B PROVISIONS VIA NEXUS                                                │
+│                                                                              │
+│    PATCH /api/v1/subscribers/SUB-2024-999                                   │
+│    { "ispco_id": "ISP-B", "service_tier": "business-500" }                 │
+│                                                                              │
+│    Nexus validates ISP-B is authorized, notifies ISP-A of churn            │
+│                                                                              │
+│ 3. CLSET SYNC TO OLT-BNG                                                     │
+│                                                                              │
+│    OLT-BNG sees ispco_id changed: ISP-A → ISP-B                             │
+│                                                                              │
+│ 4. TEARDOWN ISP-A SESSION                                                    │
+│                                                                              │
+│    - RADIUS Accounting-Stop to ISP-A                                        │
+│    - Release ISP-A IP from hashring                                         │
+│    - Remove from ISP-A routing table                                        │
+│    - Clear eBPF maps                                                        │
+│                                                                              │
+│ 5. DISCONNECT CPE (triggers re-authentication)                               │
+│                                                                              │
+│    - Send DHCP NAK on next renewal, or                                      │
+│    - Wait for lease expiry, or                                              │
+│    - Force disconnect (PPPoE: PADT)                                         │
+│                                                                              │
+│ 6. ESTABLISH ISP-B SESSION                                                   │
+│                                                                              │
+│    - CPE reconnects → DHCP DISCOVER                                         │
+│    - RADIUS to ISP-B: Access-Accept                                         │
+│    - Allocate IP from ISP-B pool                                            │
+│    - Update routing: add to ISP-B table                                     │
+│    - Apply ISP-B QoS                                                        │
+│    - DHCP ACK → customer online                                             │
+│    - RADIUS Accounting-Start to ISP-B                                       │
+│                                                                              │
+│ TIMELINE: ~15 seconds total (mostly DHCP/RADIUS RTT)                        │
+│                                                                              │
+│ UNCHANGED: ONT serial, PON port, fiber                                      │
+│ CHANGED: IP address, routing table, QoS, billing                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Offline Operation (Network Partition)
+
+When OLT-BNG loses connectivity to Nexus Server:
+
+### What Still Works (Existing Customers)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ✅ DHCP RENEWALS                                                            │
+│     eBPF maps have subscriber → IP mappings in kernel memory               │
+│     Fast path generates DHCP ACK locally, no Nexus needed                   │
+│                                                                              │
+│  ✅ INTERNET TRAFFIC                                                         │
+│     BGP routes already installed in FRR/kernel                              │
+│     Policy routing rules already in place                                   │
+│     Packets flow: Customer → OLT-BNG → ISP PE → Internet                   │
+│                                                                              │
+│  ✅ NAT TRANSLATIONS                                                         │
+│     NAT state in eBPF maps (local)                                          │
+│     Existing sessions continue working                                      │
+│                                                                              │
+│  ✅ QOS ENFORCEMENT                                                          │
+│     Rate limiting in eBPF (local)                                           │
+│     Token buckets don't need Nexus                                          │
+│                                                                              │
+│  ✅ ANTI-SPOOFING                                                            │
+│     MAC/IP bindings in eBPF maps (local)                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### What Doesn't Work (New/Changing Customers)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ❌ NEW SUBSCRIBER AUTHENTICATION                                            │
+│     Can't reach ISP RADIUS (via Nexus proxy)                                │
+│     New ONTs stay in Walled Garden until partition heals                   │
+│                                                                              │
+│  ❌ NEW IP ALLOCATIONS                                                       │
+│     Hashring is at Nexus                                                    │
+│     Option: Local emergency pool for new subs during partition?            │
+│                                                                              │
+│  ❌ CONFIG UPDATES                                                           │
+│     CLSet sync paused                                                       │
+│     QoS changes, ISP config changes not received                           │
+│                                                                              │
+│  ❌ ISP CHURN                                                                │
+│     Can't validate subscriber moved to new ISP                              │
+│     Customer stays on old ISP until partition heals                        │
+│                                                                              │
+│  ❌ ADMINISTRATIVE DISCONNECTS                                               │
+│     ISP can't push disconnect commands                                      │
+│     Non-paying customers keep working during partition                     │
+│                                                                              │
+│  ❌ RADIUS ACCOUNTING                                                        │
+│     Accounting records queued locally                                       │
+│     Sent when connectivity restored                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Partition Recovery
+
+When connectivity is restored:
+
+```
+1. Nexus Agent reconnects to CLSet mesh
+2. CRDT merge of local changes (allocations made during partition)
+3. Receive missed config updates
+4. Flush queued RADIUS Accounting records
+5. Process any pending ISP churn requests
+6. Process any pending disconnects
+
+No data loss - CRDT ensures eventual consistency
+```
+
+---
+
+## Session State Machine
+
+```
+                                    ┌─────────────────┐
+                                    │   ONT Powered   │
+                                    │      Off        │
+                                    └────────┬────────┘
+                                             │ Power on
+                                             ▼
+┌─────────────┐    Discovered    ┌─────────────────────┐
+│   Unknown   │◄────────────────│    Walled Garden    │◄─────────────┐
+│    ONT      │                  │    (No ISP yet)     │              │
+└─────────────┘                  └──────────┬──────────┘              │
+                                            │ Sign up                 │
+                                            ▼                         │
+                                 ┌─────────────────────┐              │
+                                 │  RADIUS Auth        │              │
+                                 │  IP Allocation      │              │
+                                 └──────────┬──────────┘              │
+                                            │                         │
+                                            ▼                         │
+                    Suspend     ┌─────────────────────┐   Churn       │
+               ┌───────────────│       Active        │───────────────┘
+               │                │   (Full Internet)   │
+               │                └──────────┬──────────┘
+               │                           │
+               ▼                           │ Power off / lease expire
+    ┌─────────────────────┐               │
+    │     Suspended       │               ▼
+    │  (Walled Garden     │    ┌─────────────────────┐
+    │   or Disconnected)  │    │    Disconnected     │
+    └──────────┬──────────┘    │   (Session ended)   │
+               │               └──────────┬──────────┘
+               │ Pay bill                 │ Power on
+               └──────────────────────────┘
+                    (Re-authenticate)
 ```
 
 ---
