@@ -297,7 +297,7 @@ A single statically-linked binary containing all BNG functionality.
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │     PON      │  │    VLAN     │  │      RADIUS          │  │
 │  │   Manager    │  │  Allocator  │  │      Client          │  │
-│  │  (Arthur)    │  │ (Lancelot)  │  │  (multi-ISP aware)   │  │
+│  │              │  │             │  │  (multi-ISP aware)   │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
 │                                                                 │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
@@ -334,13 +334,13 @@ pkg/
 │   ├── cache.go        # Local state cache
 │   └── watcher.go      # Config change notifications
 │
-├── pon/                # PON management (Arthur logic)
+├── pon/                # PON management
 │   ├── manager.go      # PON port discovery
 │   ├── nte.go          # NTE (ONU/ONT) handling
 │   ├── omci.go         # OMCI protocol (GPON)
 │   └── gnmi.go         # gNMI protocol (vendor-specific)
 │
-├── vlan/               # VLAN allocation (Lancelot logic)
+├── vlan/               # VLAN allocation
 │   ├── allocator.go    # S-TAG/C-TAG allocation
 │   ├── pool.go         # VLAN pool management
 │   └── types.go        # VLAN types

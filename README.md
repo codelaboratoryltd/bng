@@ -1,6 +1,6 @@
 # BNG (Broadband Network Gateway)
 
-eBPF/XDP-accelerated BNG implementation for Kubernetes edge deployments.
+eBPF/XDP-accelerated BNG implementation for ISP edge deployments.
 
 ## Project Overview
 
@@ -10,7 +10,7 @@ This project implements a cloud-native Broadband Network Gateway using eBPF/XDP 
 
 - **eBPF/XDP Fast Path**: Kernel-level packet processing for sub-millisecond latency
 - **State Management**: In-memory store with CRDT-ready interface (CLSet integration planned)
-- **Kubernetes Native**: Cilium CNI integration, GitOps deployment
+- **Edge-Native**: Runs directly on OLT hardware (bare metal Linux)
 - **Multi-ISP Support**: Policy-based routing with per-ISP routing tables
 - **Zero-Touch Provisioning**: OLTs self-register and auto-configure
 - **Offline-First**: Edge sites continue operating during network partitions
@@ -124,9 +124,9 @@ Captive portal for unauthenticated subscribers:
 | Control Plane | Go |
 | Routing Daemon | FRR (bgpd, bfdd) |
 | State Management | In-memory (CRDT-ready) |
-| Container Platform | Kubernetes |
-| CNI | Cilium |
-| Observability | Prometheus, Hubble |
+| Deployment | Bare metal Linux (systemd) |
+| Observability | Prometheus |
+| Dev Environment | k3d, Tilt (for testing) |
 
 ## Development
 
@@ -191,18 +191,18 @@ For edge deployment (10-40 Gbps), eBPF/XDP is preferred:
 | Aspect | eBPF/XDP | VPP |
 |--------|----------|-----|
 | Performance | 10-40 Gbps (sufficient for edge) | 100+ Gbps |
-| K8s Integration | Native (Cilium) | Requires privileged pods |
-| Operations | Simple (standard Linux) | Complex (DPDK, hugepages) |
-| Observability | Hubble | Custom instrumentation |
-| Resource Sharing | Yes | Dedicated hardware |
+| Deployment | Standard Linux, no special config | DPDK, hugepages, NIC binding |
+| Operations | Simple (systemd service) | Complex (dedicated hardware) |
+| Observability | Prometheus, standard Linux tools | Custom instrumentation |
+| Resource Sharing | Yes (shared hardware) | No (dedicated) |
 
 VPP remains the right choice for core aggregation (100+ Gbps).
 
 ## Related Projects
 
-- [Cilium](https://cilium.io/) - eBPF-based networking
-- [FRR](https://frrouting.org/) - Open source routing suite
-- [VPP](https://fd.io/) - Vector Packet Processing (for core)
+- [FRR](https://frrouting.org/) - Open source routing suite (used for BGP)
+- [cilium/ebpf](https://github.com/cilium/ebpf) - eBPF Go library
+- [VPP](https://fd.io/) - Vector Packet Processing (for core aggregation)
 
 ## Author
 

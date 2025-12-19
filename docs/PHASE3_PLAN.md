@@ -24,7 +24,7 @@ All functions in one binary for simplicity:
 
 ```
 bng run
-  ├── OLT Simulator (mock Arthur events)
+  ├── OLT Simulator (mock PON events)
   ├── RADIUS Client (talks to Worf, or stub)
   ├── DHCP Server (pool selection based on state)
   ├── Session Manager (track subscriber lifecycle)
@@ -40,7 +40,7 @@ bng run
 
 ### 1. OLT Simulator (`pkg/olt/`)
 
-**Purpose**: Simulate Arthur's ONT discovery and provisioning
+**Purpose**: Simulate ONT discovery and provisioning
 
 **Files:**
 - `pkg/olt/simulator.go` - Mock OLT that detects ONTs

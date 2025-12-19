@@ -95,8 +95,7 @@ func DefaultManagerConfig() ManagerConfig {
 	}
 }
 
-// Manager handles PON port management and NTE discovery.
-// This is inspired by Arthur from Vitrifi Borg but simplified for the OLT-BNG model.
+// Manager handles PON port management and NTE discovery for the OLT-BNG.
 type Manager struct {
 	config      ManagerConfig
 	logger      *zap.Logger

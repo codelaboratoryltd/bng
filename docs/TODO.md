@@ -145,7 +145,7 @@ Development task list for eBPF-accelerated Broadband Network Gateway.
 
 ## Phase 4: Stub State Management (Week 5-6)
 
-**Note:** Nexus/Brushtail integration deferred - use simple stubs for POC
+**Note:** External state sync deferred - use simple in-memory store for POC
 
 ### In-Memory State Store
 
@@ -299,12 +299,6 @@ Development task list for eBPF-accelerated Broadband Network Gateway.
 - [ ] Implement CRDT conflict resolution
 - [ ] Multi-region state sync
 - [ ] Handle network partitions
-
-### Brushtail Integration
-
-- [ ] Integrate existing Brushtail DHCP server
-- [ ] Use eBPF as fast path only
-- [ ] Delegate complex logic to Brushtail
 
 ### Advanced Features
 

@@ -58,7 +58,7 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
 
 ## Current Architecture
 
-### Brushtail (DHCP Server)
+### DHCP Server
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -67,7 +67,7 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
                   │ DHCP DISCOVER
                   ↓
 ┌─────────────────────────────────────────────────┐
-│  Brushtail (Userspace Go)                       │
+│  DHCP Server (Userspace Go)                       │
 │                                                  │
 │  1. Parse DHCP packet                           │
 │  2. Client classification                       │
@@ -124,7 +124,7 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
                   │ Cache miss?
                   ↓
 ┌─────────────────────────────────────────────────┐
-│  Brushtail (Userspace) - SLOW PATH              │
+│  DHCP Server (Userspace) - SLOW PATH              │
 │                                                  │
 │  • Client classification                        │
 │  • Pool selection                               │
@@ -328,7 +328,7 @@ Subscriber traffic (kernel stack after DHCP):
 #### 4. Cost Savings
 - **Don't need dedicated BNG hardware**
 - Can share K8s nodes with other edge services:
-  - Brushtail DHCP server
+  - DHCP server
   - RADIUS authentication
   - Monitoring stack
   - Other edge applications
@@ -402,7 +402,7 @@ Subscriber traffic (kernel stack after DHCP):
 │                                          │
 │  ┌────────────────────────────────┐     │
 │  │ Control Plane Pods (Go)        │     │
-│  │  - Brushtail DHCP               │     │
+│  │  - DHCP               │     │
 │  │  - RADIUS client                │     │
 │  │  - Nexus CRDT sync             │     │
 │  └────────────────────────────────┘     │
@@ -430,7 +430,7 @@ Subscriber traffic (kernel stack after DHCP):
 
 ### Recommended Architecture: Pure eBPF
 
-**For Vitrifi edge deployment, use pure eBPF:**
+**For edge deployment, use pure eBPF:**
 
 ```
 ┌─────────────────────────────────────────┐
@@ -450,7 +450,7 @@ Subscriber traffic (kernel stack after DHCP):
 │  └────────────────────────────────┘     │
 │                                          │
 │  ┌────────────────────────────────┐     │
-│  │ Brushtail DHCP (Go pod)        │     │
+│  │ DHCP (Go pod)        │     │
 │  │  - Slow path DHCP               │     │
 │  │  - Nexus CRDT integration      │     │
 │  └────────────────────────────────┘     │
@@ -523,7 +523,7 @@ Uplink NIC:     10G or 40G (standard routing)
 │  Edge Location A (Kubernetes Cluster)                     │
 │                                                            │
 │  ┌──────────────────────────────────────────────────┐    │
-│  │ Brushtail Pod                                     │    │
+│  │ DHCP Server Pod                                     │    │
 │  │                                                    │    │
 │  │  ┌──────────────────────────────────────────┐    │    │
 │  │  │ eBPF/XDP Programs (Kernel)               │    │    │
@@ -571,24 +571,24 @@ Uplink NIC:     10G or 40G (standard routing)
 1. Subscriber sends DHCP DISCOVER
 2. eBPF/XDP receives packet at NIC
 3. Lookup MAC in eBPF map → MISS (new subscriber)
-4. Pass to userspace Brushtail
+4. Pass to userspace DHCP Server
 ```
 
 **Step 2: Userspace Processing**
 ```
-5. Brushtail classifies client (residential/business)
+5. DHCP Server classifies client (residential/business)
 6. Selects IP pool based on classification
 7. Queries Nexus for available IP
 8. Nexus allocates IP (CRDT operation)
-9. Brushtail generates DHCP OFFER
-10. Brushtail updates eBPF map (cache allocation)
+9. DHCP Server generates DHCP OFFER
+10. DHCP Server updates eBPF map (cache allocation)
 ```
 
 **Step 3: CRDT Synchronisation**
 ```
 11. Nexus broadcasts allocation to other regions (CLSet)
 12. Nexus instances at other edge locations receive update
-13. Other Brushtail instances update their eBPF maps
+13. Other DHCP Server instances update their eBPF maps
 ```
 
 **Step 4: Subsequent Requests (Fast Path)**
@@ -818,12 +818,12 @@ Nexus provides **distributed state synchronisation** across edge locations:
 3. **State Recovery**
    - eBPF maps are volatile (lost on pod restart)
    - Nexus provides persistent state
-   - On startup, Brushtail repopulates eBPF maps from Nexus
+   - On startup, DHCP Server repopulates eBPF maps from Nexus
 
-### Data Flow: Nexus ↔ Brushtail
+### Data Flow: Nexus ↔ DHCP Server
 
 ```go
-// Brushtail userspace code
+// DHCP Server userspace code
 package main
 
 import (
@@ -961,7 +961,7 @@ Time T4:
 
 ## Performance Analysis
 
-### Baseline (Current Brushtail)
+### Baseline (Current DHCP Server)
 
 | Metric | Value | Notes |
 |--------|-------|-------|
@@ -994,12 +994,12 @@ CPU = 0.8 × 0.2 cores + 0.2 × 3.5 cores = 0.9 cores
 ### Cost Savings
 
 **Without eBPF:**
-- 100k subscribers = 20 Brushtail pods (5k subscribers/pod)
+- 100k subscribers = 20 DHCP Server pods (5k subscribers/pod)
 - 20 pods × 4 cores = 80 cores
 - AWS cost: ~$2,000/month
 
 **With eBPF:**
-- 100k subscribers = 2 Brushtail pods (50k subscribers/pod)
+- 100k subscribers = 2 DHCP Server pods (50k subscribers/pod)
 - 2 pods × 1 core = 2 cores
 - AWS cost: ~$50/month
 
@@ -1026,18 +1026,18 @@ CPU = 0.8 × 0.2 cores + 0.2 × 3.5 cores = 0.9 cores
 
 ---
 
-### Phase 2: Integration with Brushtail (3 weeks)
+### Phase 2: Integration with DHCP Server (3 weeks)
 
-**Goal:** Integrate eBPF with existing Brushtail code
+**Goal:** Integrate eBPF with existing DHCP Server code
 
 **Tasks:**
 1. Load eBPF program from Go code (cilium/ebpf library)
-2. Populate eBPF maps from Brushtail allocations
+2. Populate eBPF maps from DHCP Server allocations
 3. Implement slow path fallback (eBPF → userspace)
 4. Add metrics (fast path hit rate, latency)
 
 **Success Criteria:**
-- Brushtail pod loads eBPF on startup
+- DHCP Server pod loads eBPF on startup
 - Fast path handles renewals
 - Slow path handles new allocations
 - Hit rate > 70%
@@ -1099,7 +1099,7 @@ CPU = 0.8 × 0.2 cores + 0.2 × 3.5 cores = 0.9 cores
 
 ## Code Examples
 
-### Complete Brushtail Integration
+### Complete DHCP Server Integration
 
 #### main.go
 ```go
@@ -1115,8 +1115,8 @@ import (
     dhcp "github.com/insomniacslk/dhcp/dhcpv4"
 )
 
-type BrushtailServer struct {
-    // Existing Brushtail components
+type DHCPServer struct {
+    // Existing DHCP Server components
     allocator Allocator
     classifier *ClientClassifier
 
@@ -1131,7 +1131,7 @@ type BrushtailServer struct {
     nexus *NexusClient
 }
 
-func NewBrushtailServer(iface string) (*BrushtailServer, error) {
+func NewDHCPServer(iface string) (*DHCPServer, error) {
     // Load eBPF program
     spec, err := ebpf.LoadCollectionSpec("brushtail_ebpf.o")
     if err != nil {
@@ -1157,7 +1157,7 @@ func NewBrushtailServer(iface string) (*BrushtailServer, error) {
         return nil, fmt.Errorf("attach XDP: %w", err)
     }
 
-    s := &BrushtailServer{
+    s := &DHCPServer{
         xdpProg:         coll.Programs["brushtail_dhcp_fastpath"],
         xdpLink:         xdpLink,
         subscriberPools: coll.Maps["subscriber_pools"],
@@ -1176,7 +1176,7 @@ func NewBrushtailServer(iface string) (*BrushtailServer, error) {
     return s, nil
 }
 
-func (s *BrushtailServer) initializeFromNexus() error {
+func (s *DHCPServer) initializeFromNexus() error {
     ctx := context.Background()
 
     // Fetch all active leases from Nexus
@@ -1213,7 +1213,7 @@ func (s *BrushtailServer) initializeFromNexus() error {
     return nil
 }
 
-func (s *BrushtailServer) watchNexusUpdates() {
+func (s *DHCPServer) watchNexusUpdates() {
     ctx := context.Background()
     updates := s.nexus.WatchAllocations(ctx)
 
@@ -1236,7 +1236,7 @@ func (s *BrushtailServer) watchNexusUpdates() {
     }
 }
 
-func (s *BrushtailServer) HandleDHCP(pkt *dhcp.DHCPv4) (*dhcp.DHCPv4, error) {
+func (s *DHCPServer) HandleDHCP(pkt *dhcp.DHCPv4) (*dhcp.DHCPv4, error) {
     // NOTE: This is SLOW PATH only
     // Fast path (renewals) handled entirely in eBPF kernel space
     // This function only called for cache misses
@@ -1287,7 +1287,7 @@ func (s *BrushtailServer) HandleDHCP(pkt *dhcp.DHCPv4) (*dhcp.DHCPv4, error) {
     return reply, nil
 }
 
-func (s *BrushtailServer) Close() error {
+func (s *DHCPServer) Close() error {
     // Detach XDP program
     if s.xdpLink != nil {
         s.xdpLink.Close()
@@ -1467,7 +1467,7 @@ This architecture demonstrates how eBPF can accelerate ISP DHCP services by **10
 
 **Next Steps:**
 1. Build PoC (Phase 1)
-2. Integrate with Brushtail (Phase 2)
+2. Integrate with DHCP Server (Phase 2)
 3. Connect to Nexus (Phase 3)
 4. Production validation (Phase 4)
 
@@ -1478,8 +1478,6 @@ This architecture demonstrates how eBPF can accelerate ISP DHCP services by **10
 - [Cilium eBPF Documentation](https://docs.cilium.io/en/latest/bpf/)
 - [XDP Tutorial](https://github.com/xdp-project/xdp-tutorial)
 - [eBPF Go Library](https://github.com/cilium/ebpf)
-- [Nexus Architecture](../borg/src/cne/nexus/)
-- [Brushtail Source](../borg/src/cne/brushtail/)
 
 ---
 
