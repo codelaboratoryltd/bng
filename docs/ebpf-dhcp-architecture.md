@@ -6,15 +6,20 @@
 
 ## Executive Summary
 
-This document outlines an architecture for accelerating ISP DHCP services using eBPF/XDP while maintaining distributed state consistency through CRDT. The design achieves 10x throughput improvement (5k → 50k requests/sec) and enables edge deployment with sub-millisecond response times.
+This document outlines an architecture for accelerating ISP DHCP services using eBPF/XDP. The key insight is that **IP allocation happens at RADIUS time** using a hashring, making **DHCP a simple read operation**. This achieves 10x throughput improvement (5k → 50k requests/sec) with sub-millisecond response times.
 
 **Key Technologies:**
 - eBPF/XDP (kernel-level packet processing)
-- CLSet/CRDT (Conflict-free Replicated Data Types via Nexus)
-- Kubernetes (cloud-native deployment)
+- CLSet/CRDT (hashring-based IP allocation via Nexus)
+- Bare metal Linux (systemd service on OLT hardware)
+
+**Key Architecture:**
+- IP allocation at RADIUS authentication time (hashring - no conflicts)
+- DHCP is read-only (lookup pre-allocated IP)
+- eBPF fast path handles 95%+ of DHCP requests in kernel
 
 **Target Use Case:**
-ISP subscriber IP address allocation at edge locations with multi-region state synchronisation.
+ISP subscriber IP delivery at edge locations with multi-region state synchronisation.
 
 ---
 
@@ -92,9 +97,9 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
 - CPU: High (100% at peak)
 - Context switches: ~10,000/sec
 
-**Bottlenecks:**
+**Bottlenecks (without eBPF):**
 1. Every packet goes through userspace
-2. Database query per allocation
+2. Database query per DHCP request (even for renewals)
 3. Context switching overhead
 4. No request caching
 
@@ -104,7 +109,17 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
 
 ### Two-Tier Architecture: Fast Path + Slow Path
 
+**Important:** IP allocation happens at RADIUS time, NOT during DHCP. DHCP is purely a read operation.
+
 ```
+┌─────────────────────────────────────────────────┐
+│  RADIUS Authentication (IP Allocation)          │
+│  • Subscriber authenticates                     │
+│  • Nexus allocates IP from hashring             │
+│  • IP stored in subscriber record               │
+└─────────────────┬───────────────────────────────┘
+                  │ (IP already allocated)
+                  ↓
 ┌─────────────────────────────────────────────────┐
 │  DHCP Request                                    │
 └─────────────────┬───────────────────────────────┘
@@ -115,34 +130,32 @@ ISP subscriber IP address allocation at edge locations with multi-region state s
 │                                                  │
 │  • Parse DHCP packet                            │
 │  • Lookup MAC in eBPF map                       │
-│  • Cache hit? → Generate reply in kernel        │
-│  • Return packet (NO USERSPACE!)                │
+│  • Cache hit? → Return pre-allocated IP         │
+│  • Generate reply in kernel (NO USERSPACE!)     │
 │                                                  │
 │  Latency: ~10 microseconds                      │
-│  Handles: 80% of traffic (renewals, known MACs) │
+│  Handles: 95%+ of traffic (IP already cached)   │
 └─────────────────┬───────────────────────────────┘
-                  │ Cache miss?
+                  │ Cache miss? (rare)
                   ↓
 ┌─────────────────────────────────────────────────┐
-│  DHCP Server (Userspace) - SLOW PATH              │
+│  DHCP Server (Userspace) - SLOW PATH            │
 │                                                  │
-│  • Client classification                        │
-│  • Pool selection                               │
-│  • Query Nexus (CRDT) for IP                   │
-│  • Allocate lease                               │
+│  • Query Nexus for subscriber's IP (READ-ONLY)  │
+│  • NO allocation logic - IP already assigned    │
 │  • Update eBPF maps (cache for future)          │
 │  • Generate DHCP OFFER                          │
 │                                                  │
-│  Latency: ~10 milliseconds                      │
-│  Handles: 20% of traffic (new allocations)      │
+│  Latency: ~5 milliseconds                       │
+│  Handles: <5% of traffic (cache population)     │
 └─────────────────┬───────────────────────────────┘
                   │
                   ↓
 ┌─────────────────────────────────────────────────┐
 │  Nexus (CRDT State Store)                      │
-│  • Distributed IP allocation table              │
+│  • Hashring-based IP allocation (at RADIUS)     │
+│  • Subscriber → IP mapping (read-only for DHCP) │
 │  • Multi-region synchronisation                 │
-│  • Eventual consistency                         │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -552,8 +565,8 @@ Uplink NIC:     10G or 40G (standard routing)
 ┌───────────────────────────────────────────────────────────┐
 │  Nexus Cluster (Distributed State)                       │
 │  - Multi-region CRDT consensus                            │
-│  - IP allocation conflict resolution                      │
-│  - Subscriber → IP mapping                                │
+│  - Hashring-based IP allocation (at RADIUS time)          │
+│  - Subscriber → IP mapping (read-only for DHCP)           │
 └───────────────────────────────────────────────────────────┘
                           ↕
                     (CLSet Sync)
@@ -564,42 +577,50 @@ Uplink NIC:     10G or 40G (standard routing)
 └───────────────────────────────────────────────────────────┘
 ```
 
-### Data Flow: New Subscriber
+### Data Flow: Subscriber Authentication and DHCP
 
-**Step 1: Initial DHCP DISCOVER**
+**Step 1: RADIUS Authentication (IP Allocation)**
 ```
-1. Subscriber sends DHCP DISCOVER
-2. eBPF/XDP receives packet at NIC
-3. Lookup MAC in eBPF map → MISS (new subscriber)
-4. Pass to userspace DHCP Server
-```
-
-**Step 2: Userspace Processing**
-```
-5. DHCP Server classifies client (residential/business)
-6. Selects IP pool based on classification
-7. Queries Nexus for available IP
-8. Nexus allocates IP (CRDT operation)
-9. DHCP Server generates DHCP OFFER
-10. DHCP Server updates eBPF map (cache allocation)
+1. Subscriber connects (PPPoE session or IPoE)
+2. RADIUS authentication request sent
+3. RADIUS server authenticates subscriber
+4. Nexus allocates IP from hashring (deterministic, no conflicts)
+5. RADIUS reply includes allocated IP
+6. Subscriber session established with allocated IP
+7. Nexus syncs allocation to all edge locations (CLSet)
 ```
 
-**Step 3: CRDT Synchronisation**
+**Step 2: DHCP DISCOVER (Read-Only Lookup)**
 ```
-11. Nexus broadcasts allocation to other regions (CLSet)
-12. Nexus instances at other edge locations receive update
-13. Other DHCP Server instances update their eBPF maps
-```
-
-**Step 4: Subsequent Requests (Fast Path)**
-```
-14. Subscriber sends DHCP REQUEST (renewal)
-15. eBPF/XDP receives packet
-16. Lookup MAC in eBPF map → HIT (cached)
-17. Generate DHCP ACK in kernel
-18. Reply directly (NO USERSPACE!)
+8. Subscriber sends DHCP DISCOVER
+9. eBPF/XDP receives packet at NIC
+10. Lookup MAC in eBPF map → HIT (IP already allocated)
+11. Generate DHCP OFFER in kernel with pre-allocated IP
+12. Reply directly (NO USERSPACE!)
     Latency: ~10 microseconds
 ```
+
+**Step 3: Cache Miss (Slow Path)**
+```
+If eBPF cache miss (rare - only if cache not yet populated):
+13. Pass to userspace DHCP Server
+14. DHCP Server queries Nexus for subscriber's allocated IP
+15. Returns pre-allocated IP (NO allocation logic)
+16. Updates eBPF map (cache for future requests)
+17. Generates DHCP OFFER
+```
+
+**Step 4: DHCP Renewals (Fast Path)**
+```
+18. Subscriber sends DHCP REQUEST (renewal)
+19. eBPF/XDP receives packet
+20. Lookup MAC in eBPF map → HIT (cached)
+21. Generate DHCP ACK in kernel
+22. Reply directly (NO USERSPACE!)
+    Latency: ~10 microseconds
+```
+
+**Key Point:** IP allocation happens at RADIUS time, not DHCP time. DHCP is purely a read operation.
 
 ---
 
@@ -805,17 +826,25 @@ static __always_inline void generate_dhcp_reply(
 
 ### Nexus Role
 
-Nexus provides **distributed state synchronisation** across edge locations:
+Nexus provides **distributed state synchronisation** across edge locations using a **hashring-based IP allocation** model:
 
-1. **IP Allocation Conflict Resolution**
-   - Two edge locations try to allocate same IP → CRDT resolves
-   - Last-write-wins with vector clocks
+1. **Hashring IP Allocation (at RADIUS time)**
+   - IP allocation happens during RADIUS authentication, NOT during DHCP
+   - CLSet maintains a hashring of all available IPs per pool
+   - When subscriber authenticates, an IP is deterministically allocated from the hashring
+   - No conflicts possible - hashring ensures unique allocation
 
-2. **Multi-Region Consistency**
-   - Subscriber allocation in Region A syncs to Region B
-   - Enables subscriber roaming
+2. **DHCP as Read-Only**
+   - By the time DHCP runs, the subscriber already has an allocated IP
+   - DHCP simply looks up the pre-allocated IP from Nexus/eBPF cache
+   - Leases are essentially static after initial allocation
+   - No "allocation logic" in DHCP - just a read operation
 
-3. **State Recovery**
+3. **Multi-Region Consistency**
+   - Subscriber → IP mappings sync across regions via CLSet
+   - Enables subscriber roaming (IP follows subscriber)
+
+4. **State Recovery**
    - eBPF maps are volatile (lost on pod restart)
    - Nexus provides persistent state
    - On startup, DHCP Server repopulates eBPF maps from Nexus
@@ -841,21 +870,27 @@ type DHCPServer struct {
     nexus *nexus.Client
 }
 
-// Handle new allocation (slow path)
-func (s *DHCPServer) AllocateLease(mac uint64, clientClass string) (net.IP, error) {
-    // 1. Query Nexus for available IP
-    ip, err := s.nexus.AllocateIP(mac, clientClass)
+// Lookup pre-allocated IP (slow path - cache miss only)
+// Note: IP was already allocated at RADIUS time, DHCP is read-only
+func (s *DHCPServer) LookupSubscriberIP(mac uint64) (net.IP, error) {
+    // 1. Query Nexus for subscriber's pre-allocated IP
+    // (IP was allocated during RADIUS authentication)
+    subscriber, err := s.nexus.GetSubscriber(mac)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("subscriber not found: %w", err)
+    }
+
+    if subscriber.AllocatedIP == nil {
+        return nil, fmt.Errorf("subscriber has no allocated IP (RADIUS not completed?)")
     }
 
     // 2. Update eBPF map (cache for fast path)
     assignment := PoolAssignment{
-        PoolID:      poolID,
-        AllocatedIP: ip,
-        VlanID:      vlan,
-        ClientClass: classID,
-        LeaseExpiry: time.Now().Add(24 * time.Hour).Unix(),
+        PoolID:      subscriber.PoolID,
+        AllocatedIP: subscriber.AllocatedIP,
+        VlanID:      subscriber.VlanID,
+        ClientClass: subscriber.ClientClass,
+        LeaseExpiry: subscriber.LeaseExpiry.Unix(),
     }
 
     if err := s.subscriberPools.Put(mac, assignment); err != nil {
@@ -863,10 +898,7 @@ func (s *DHCPServer) AllocateLease(mac uint64, clientClass string) (net.IP, erro
         // Don't fail DHCP, eBPF cache is best-effort
     }
 
-    // 3. Nexus broadcasts allocation to other regions (CRDT)
-    // This happens automatically in Nexus via CLSet sync
-
-    return ip, nil
+    return subscriber.AllocatedIP, nil
 }
 
 // Handle Nexus updates from other regions
@@ -919,43 +951,54 @@ func (s *DHCPServer) Initialize() error {
 }
 ```
 
-### CRDT Conflict Resolution Example
+### Hashring IP Allocation (No Conflicts)
 
-**Scenario:** Two edge locations allocate same IP simultaneously
+**Why hashring eliminates conflicts:**
 
+The CLSet maintains a **hashring of all available IPs** for each pool. When a subscriber authenticates via RADIUS, the IP is allocated deterministically based on the hashring position - no two nodes can allocate the same IP.
+
+```
+IP Pool: 10.0.1.0/24 (254 usable IPs)
+
+Hashring representation:
+┌────────────────────────────────────────┐
+│    10.0.1.1 ─── 10.0.1.2 ─── 10.0.1.3  │
+│       │                           │     │
+│  10.0.1.254                   10.0.1.4  │
+│       │                           │     │
+│  10.0.1.253 ── ... ────────── 10.0.1.5  │
+└────────────────────────────────────────┘
+
+Allocation process:
+1. Subscriber authenticates via RADIUS
+2. Subscriber ID hashed to position on ring
+3. Next available IP clockwise from hash position allocated
+4. IP marked as allocated in CLSet (syncs to all nodes)
+```
+
+**Example: Simultaneous allocations at different edges**
 ```
 Time T0:
-  Edge A: Subscriber 1 requests IP
-  Edge B: Subscriber 2 requests IP
+  Edge A: Subscriber 1 (hash position 42) → gets 10.0.1.42
+  Edge B: Subscriber 2 (hash position 150) → gets 10.0.1.150
+
+  No conflict possible - different hash positions = different IPs
 
 Time T1:
-  Edge A: Allocates 10.0.1.100 to Subscriber 1
-  Edge B: Allocates 10.0.1.100 to Subscriber 2
-  (Both write to local Nexus replica)
-
-Time T2:
-  CLSet propagates both allocations
-  Nexus CRDT detects conflict
-
-Time T3:
-  CRDT resolution (vector clock comparison):
-    - Edge A timestamp: 2025-12-09T12:00:01.500Z
-    - Edge B timestamp: 2025-12-09T12:00:01.750Z
-
-  Edge B wins (later timestamp)
-
-Time T4:
-  Edge A receives CRDT merge:
-    - 10.0.1.100 → Subscriber 2 (Edge B allocation)
-    - Edge A must revoke Subscriber 1's lease
-    - Edge A sends DHCP NAK to Subscriber 1
-    - Subscriber 1 gets different IP on next request
+  CLSet syncs both allocations to all edges
+  Each edge now knows both subscribers' IPs
 ```
 
-**Why this works:**
-- DHCP leases are soft state (clients retry)
-- Conflict resolution is rare (IP pools are large)
-- CRDT ensures eventual consistency
+**Static IP support:**
+- Subscribers can have statically assigned IPs (configured in Nexus)
+- These are simply pre-populated in the subscriber → IP mapping
+- RADIUS returns the static IP instead of allocating from hashring
+
+**Why this is simpler:**
+- No conflict resolution needed
+- No DHCP NAKs due to conflicts
+- Deterministic allocation (same subscriber always gets same IP if available)
+- DHCP becomes trivial - just a read operation
 
 ---
 
@@ -1049,15 +1092,16 @@ CPU = 0.8 × 0.2 cores + 0.2 × 3.5 cores = 0.9 cores
 **Goal:** Sync eBPF cache with Nexus CRDT state
 
 **Tasks:**
-1. Watch Nexus for allocation updates
+1. Watch Nexus for subscriber → IP mapping updates
 2. Update eBPF maps when Nexus syncs from other regions
 3. Repopulate eBPF maps from Nexus on pod restart
-4. Handle CRDT conflicts (revoke leases if needed)
+4. Integrate with RADIUS for IP allocation at auth time
 
 **Success Criteria:**
 - eBPF cache stays in sync with Nexus
-- Multi-region allocations propagate correctly
+- Multi-region mappings propagate correctly
 - Pod restart recovers eBPF state from Nexus
+- DHCP is read-only (no allocation logic)
 
 ---
 
@@ -1069,13 +1113,13 @@ CPU = 0.8 × 0.2 cores + 0.2 × 3.5 cores = 0.9 cores
 1. Deploy to staging cluster
 2. Load testing (target: 50k req/sec)
 3. Chaos testing (pod restarts, network partitions)
-4. Validate CRDT conflict resolution
+4. Validate hashring allocation and CLSet sync
 5. Performance tuning
 
 **Success Criteria:**
 - Sustain 50k req/sec
 - P99 latency < 5ms
-- No allocation conflicts
+- Hashring allocation works correctly
 - Graceful degradation on failures
 
 ---
@@ -1237,50 +1281,54 @@ func (s *DHCPServer) watchNexusUpdates() {
 }
 
 func (s *DHCPServer) HandleDHCP(pkt *dhcp.DHCPv4) (*dhcp.DHCPv4, error) {
-    // NOTE: This is SLOW PATH only
-    // Fast path (renewals) handled entirely in eBPF kernel space
-    // This function only called for cache misses
+    // NOTE: This is SLOW PATH only (cache miss)
+    // Fast path handled entirely in eBPF kernel space
+    // DHCP is READ-ONLY - IP was allocated at RADIUS time
 
     mac := macToUint64(pkt.ClientHWAddr)
 
     log.Printf("SLOW PATH: Handling DHCP request for MAC=%x", mac)
 
-    // Client classification
-    clientClass := s.classifier.Classify(pkt)
-
-    // Pool selection based on client class
-    pool, err := s.selectPool(clientClass)
+    // Lookup subscriber's pre-allocated IP from Nexus
+    // (IP was allocated during RADIUS authentication, not here)
+    subscriber, err := s.nexus.GetSubscriber(context.Background(), mac)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("subscriber not found: %w", err)
     }
 
-    // Allocate IP from Nexus (CRDT)
-    ip, err := s.nexus.AllocateIP(context.Background(), mac, pool.ID)
+    if subscriber.AllocatedIP == nil {
+        // Subscriber authenticated via RADIUS but no IP allocated yet
+        // This shouldn't happen in normal flow
+        return nil, fmt.Errorf("no IP allocated for subscriber (RADIUS incomplete?)")
+    }
+
+    // Get pool metadata for DHCP options
+    pool, err := s.getPool(subscriber.PoolID)
     if err != nil {
         return nil, err
     }
 
     // Update eBPF cache for future requests (FAST PATH)
     assignment := PoolAssignment{
-        PoolID:      pool.ID,
-        AllocatedIP: ip2uint32(ip),
-        VlanID:      pool.VlanID,
-        ClientClass: clientClass,
-        LeaseExpiry: time.Now().Add(24 * time.Hour).Unix(),
+        PoolID:      subscriber.PoolID,
+        AllocatedIP: ip2uint32(subscriber.AllocatedIP),
+        VlanID:      subscriber.VlanID,
+        ClientClass: subscriber.ClientClass,
+        LeaseExpiry: subscriber.LeaseExpiry.Unix(),
     }
 
     if err := s.subscriberPools.Put(mac, assignment); err != nil {
-        log.Printf("Warning: failed to cache allocation in eBPF: %v", err)
+        log.Printf("Warning: failed to cache in eBPF: %v", err)
         // Don't fail DHCP, eBPF cache is best-effort
     } else {
-        log.Printf("Cached allocation in eBPF for MAC=%x IP=%s", mac, ip)
+        log.Printf("Cached in eBPF for MAC=%x IP=%s", mac, subscriber.AllocatedIP)
     }
 
-    // Generate DHCP OFFER/ACK
+    // Generate DHCP OFFER/ACK with pre-allocated IP
     reply := dhcp.NewReplyFromRequest(pkt)
-    reply.YourIPAddr = ip
+    reply.YourIPAddr = subscriber.AllocatedIP
     reply.Options.Update(dhcp.OptServerIdentifier(s.serverIP))
-    reply.Options.Update(dhcp.OptIPAddressLeaseTime(24 * time.Hour))
+    reply.Options.Update(dhcp.OptIPAddressLeaseTime(subscriber.LeaseExpiry.Sub(time.Now())))
     reply.Options.Update(dhcp.OptRouter(pool.Gateway))
     reply.Options.Update(dhcp.OptDNS(pool.DNS...))
 
@@ -1355,9 +1403,9 @@ dhcp_cache_entries_total
 
 **Nexus Integration:**
 ```
-nexus_sync_events_total{type="allocation"}
+nexus_sync_events_total{type="subscriber_ip_mapping"}
 nexus_sync_events_total{type="release"}
-nexus_conflicts_total
+nexus_hashring_allocations_total
 nexus_sync_latency_milliseconds
 ```
 
@@ -1451,18 +1499,24 @@ Use eBPF to collect features, train model in userspace:
 
 ## Conclusion
 
-This architecture demonstrates how eBPF can accelerate ISP DHCP services by **10x** while maintaining distributed consistency through CRDT. The two-tier approach (fast path in kernel, slow path in userspace) provides:
+This architecture demonstrates how eBPF can accelerate ISP DHCP services by **10x** by separating IP allocation (RADIUS time) from IP delivery (DHCP time). The hashring-based allocation at RADIUS time eliminates conflicts and makes DHCP a trivial read operation.
+
+**Key Architecture Points:**
+- **IP allocation at RADIUS time** - hashring-based, conflict-free
+- **DHCP is read-only** - just lookup pre-allocated IP
+- **eBPF fast path** - 95%+ of requests handled in kernel
+- **CLSet sync** - subscriber → IP mappings replicated across regions
 
 ✅ **Performance**: 50k req/sec, sub-millisecond latency
 ✅ **Scalability**: 100k subscribers per pod
 ✅ **Cost Savings**: $1,950/month per edge location
-✅ **Edge Deployment**: Works with distributed state (Nexus)
+✅ **Simplicity**: No conflict resolution needed (hashring)
 ✅ **Reliability**: Graceful degradation (eBPF → userspace fallback)
 
 **Key Innovations:**
 1. eBPF for DHCP fast path (industry first?)
-2. Integration with CRDT for multi-region sync
-3. Kubernetes-native deployment
+2. Hashring-based IP allocation at RADIUS time
+3. DHCP as read-only operation (no allocation logic)
 4. Zero-instrumentation observability (Hubble)
 
 **Next Steps:**
