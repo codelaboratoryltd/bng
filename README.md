@@ -212,4 +212,6 @@ Vitrifi (Telecoms/ISP)
 
 ## License
 
-TBD
+Copyright (c) 2025 Code Laboratory Ltd. All Rights Reserved.
+
+This is proprietary software. See [LICENSE](LICENSE) for details.
