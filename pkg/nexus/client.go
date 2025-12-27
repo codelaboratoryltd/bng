@@ -388,3 +388,252 @@ func (c *Client) DeleteSubscriber(ctx context.Context, id string) error {
 func (c *Client) DeleteNTE(ctx context.Context, id string) error {
 	return c.NTEs.Delete(ctx, id)
 }
+
+// === IP Allocation Methods ===
+
+// GetSubscriberByMAC looks up a subscriber by their MAC address.
+// MAC is stored as NTE serial or can be derived from NTE.
+func (c *Client) GetSubscriberByMAC(mac string) (*Subscriber, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// First try to find NTE by MAC (some systems store MAC as serial)
+	for _, nte := range c.nteCache {
+		// MAC might be stored as serial or in a MAC field
+		if nte.SerialNumber == mac {
+			// Found NTE, now find subscriber
+			for _, sub := range c.subscriberCache {
+				if sub.NTEID == nte.ID {
+					return sub, true
+				}
+			}
+		}
+	}
+
+	// Direct lookup in subscriber cache by ID (if MAC is used as ID)
+	if sub, ok := c.subscriberCache[mac]; ok {
+		return sub, true
+	}
+
+	return nil, false
+}
+
+// AllocateIPForSubscriber allocates an IP address for a subscriber.
+// If the subscriber already has an IP, it returns that IP.
+// Otherwise, it allocates from the subscriber's assigned pool.
+func (c *Client) AllocateIPForSubscriber(ctx context.Context, subscriberID string) (string, error) {
+	// Get subscriber
+	sub, ok := c.GetSubscriber(subscriberID)
+	if !ok {
+		return "", fmt.Errorf("subscriber %s not found", subscriberID)
+	}
+
+	// If already has IP, return it
+	if sub.IPv4Addr != "" {
+		return sub.IPv4Addr, nil
+	}
+
+	// Get pool for this subscriber
+	poolID := sub.IPv4Pool
+	if poolID == "" {
+		// Try to get default pool from ISP config
+		if isp, ok := c.GetISP(sub.ISPID); ok && len(isp.IPv4Pools) > 0 {
+			poolID = isp.IPv4Pools[0]
+		}
+	}
+
+	if poolID == "" {
+		return "", fmt.Errorf("no IPv4 pool configured for subscriber %s", subscriberID)
+	}
+
+	// Get pool
+	pool, err := c.Pools.Get(ctx, poolID)
+	if err != nil {
+		return "", fmt.Errorf("get pool %s: %w", poolID, err)
+	}
+
+	// Allocate IP from pool using deterministic hash
+	ip, err := c.allocateFromPool(ctx, pool, subscriberID)
+	if err != nil {
+		return "", fmt.Errorf("allocate from pool: %w", err)
+	}
+
+	// Update subscriber with allocated IP
+	sub.IPv4Addr = ip
+	sub.IPv4Pool = poolID
+	sub.UpdatedAt = time.Now().UTC()
+
+	if err := c.SaveSubscriber(ctx, sub); err != nil {
+		return "", fmt.Errorf("save subscriber: %w", err)
+	}
+
+	c.logger.Info("Allocated IP for subscriber",
+		zap.String("subscriber_id", subscriberID),
+		zap.String("ip", ip),
+		zap.String("pool", poolID),
+	)
+
+	return ip, nil
+}
+
+// allocateFromPool allocates an IP from a pool using deterministic hashing.
+// This ensures the same subscriber always gets the same IP (hashring-like behavior).
+func (c *Client) allocateFromPool(ctx context.Context, pool *IPPool, subscriberID string) (string, error) {
+	// Parse CIDR
+	baseIP, ipNet, err := parseIPNet(pool.CIDR)
+	if err != nil {
+		return "", fmt.Errorf("parse CIDR %s: %w", pool.CIDR, err)
+	}
+
+	// Calculate host range
+	ones, bits := ipNet.Size()
+	hostBits := bits - ones
+	numHosts := (1 << hostBits) - 2 // Exclude network and broadcast
+
+	if numHosts <= 0 {
+		return "", fmt.Errorf("pool %s has no usable addresses", pool.ID)
+	}
+
+	// Hash subscriber ID to get deterministic offset
+	hash := hashString(subscriberID)
+	offset := int(hash%uint64(numHosts)) + 1 // +1 to skip network address
+
+	// Calculate IP
+	ip := make([]byte, 4)
+	copy(ip, baseIP)
+
+	// Add offset to base IP
+	ip[3] += byte(offset & 0xFF)
+	ip[2] += byte((offset >> 8) & 0xFF)
+	ip[1] += byte((offset >> 16) & 0xFF)
+	ip[0] += byte((offset >> 24) & 0xFF)
+
+	return formatIP(ip), nil
+}
+
+// LookupSubscriberIP looks up the pre-allocated IP for a subscriber.
+// This is the read-only operation used by DHCP.
+func (c *Client) LookupSubscriberIP(subscriberID string) (string, bool) {
+	sub, ok := c.GetSubscriber(subscriberID)
+	if !ok {
+		return "", false
+	}
+	if sub.IPv4Addr == "" {
+		return "", false
+	}
+	return sub.IPv4Addr, true
+}
+
+// GetSubscriberPool returns the pool configuration for a subscriber's IP.
+func (c *Client) GetSubscriberPool(ctx context.Context, subscriberID string) (*IPPool, error) {
+	sub, ok := c.GetSubscriber(subscriberID)
+	if !ok {
+		return nil, fmt.Errorf("subscriber %s not found", subscriberID)
+	}
+
+	if sub.IPv4Pool == "" {
+		return nil, fmt.Errorf("subscriber %s has no pool assigned", subscriberID)
+	}
+
+	return c.Pools.Get(ctx, sub.IPv4Pool)
+}
+
+// ReleaseSubscriberIP releases a subscriber's IP allocation.
+func (c *Client) ReleaseSubscriberIP(ctx context.Context, subscriberID string) error {
+	sub, ok := c.GetSubscriber(subscriberID)
+	if !ok {
+		return fmt.Errorf("subscriber %s not found", subscriberID)
+	}
+
+	if sub.IPv4Addr == "" {
+		return nil // Already released
+	}
+
+	c.logger.Info("Releasing IP for subscriber",
+		zap.String("subscriber_id", subscriberID),
+		zap.String("ip", sub.IPv4Addr),
+	)
+
+	sub.IPv4Addr = ""
+	sub.UpdatedAt = time.Now().UTC()
+
+	return c.SaveSubscriber(ctx, sub)
+}
+
+// Helper functions
+
+func parseIPNet(cidr string) ([]byte, *ipNet, error) {
+	for i := 0; i < len(cidr); i++ {
+		if cidr[i] == '/' {
+			ip := parseIPv4(cidr[:i])
+			if ip == nil {
+				return nil, nil, fmt.Errorf("invalid IP in CIDR")
+			}
+			prefix := 0
+			for j := i + 1; j < len(cidr); j++ {
+				prefix = prefix*10 + int(cidr[j]-'0')
+			}
+			mask := make([]byte, 4)
+			for k := 0; k < prefix; k++ {
+				mask[k/8] |= 1 << (7 - k%8)
+			}
+			return ip, &ipNet{IP: ip, Mask: mask}, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("invalid CIDR format")
+}
+
+type ipNet struct {
+	IP   []byte
+	Mask []byte
+}
+
+func (n *ipNet) Size() (ones int, bits int) {
+	bits = 32
+	for _, b := range n.Mask {
+		for i := 7; i >= 0; i-- {
+			if b&(1<<i) != 0 {
+				ones++
+			}
+		}
+	}
+	return ones, bits
+}
+
+func parseIPv4(s string) []byte {
+	ip := make([]byte, 4)
+	idx := 0
+	val := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == '.' {
+			if idx >= 4 || val > 255 {
+				return nil
+			}
+			ip[idx] = byte(val)
+			idx++
+			val = 0
+		} else if s[i] >= '0' && s[i] <= '9' {
+			val = val*10 + int(s[i]-'0')
+		} else {
+			return nil
+		}
+	}
+	if idx != 4 {
+		return nil
+	}
+	return ip
+}
+
+func formatIP(ip []byte) string {
+	return fmt.Sprintf("%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3])
+}
+
+func hashString(s string) uint64 {
+	// FNV-1a hash
+	var h uint64 = 14695981039346656037
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return h
+}

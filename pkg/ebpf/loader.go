@@ -46,6 +46,14 @@ type DHCPStats struct {
 	CacheExpired   uint64
 }
 
+// ServerConfig represents DHCP server configuration for eBPF (mirrors eBPF struct)
+type ServerConfig struct {
+	ServerMAC      [6]byte
+	_              [2]byte // Padding
+	ServerIP       uint32  // Network byte order
+	InterfaceIndex uint32
+}
+
 // Loader handles loading and managing eBPF programs
 type Loader struct {
 	iface   string
@@ -59,6 +67,7 @@ type Loader struct {
 	subscriberPools *ebpf.Map
 	ipPools         *ebpf.Map
 	statsMap        *ebpf.Map
+	serverConfigMap *ebpf.Map
 }
 
 // LoaderOption configures the Loader
@@ -160,6 +169,11 @@ func (l *Loader) Load(ctx context.Context) error {
 	l.statsMap = coll.Maps["stats_map"]
 	if l.statsMap == nil {
 		return fmt.Errorf("stats_map map not found")
+	}
+
+	l.serverConfigMap = coll.Maps["server_config"]
+	if l.serverConfigMap == nil {
+		return fmt.Errorf("server_config map not found")
 	}
 
 	// Initialize stats map with zeroed entry
@@ -326,6 +340,38 @@ func (l *Loader) ResetStats() error {
 	var key uint32 = 0
 	var stats DHCPStats
 	return l.statsMap.Put(&key, &stats)
+}
+
+// SetServerConfig configures the DHCP server parameters for eBPF fast path
+func (l *Loader) SetServerConfig(serverMAC net.HardwareAddr, serverIP net.IP, ifIndex int) error {
+	if l.serverConfigMap == nil {
+		return fmt.Errorf("server_config map not loaded")
+	}
+
+	var config ServerConfig
+	if len(serverMAC) >= 6 {
+		copy(config.ServerMAC[:], serverMAC[:6])
+	}
+	config.ServerIP = IPToUint32(serverIP)
+	config.InterfaceIndex = uint32(ifIndex)
+
+	var key uint32 = 0
+	return l.serverConfigMap.Put(&key, &config)
+}
+
+// GetServerConfig retrieves the current server configuration
+func (l *Loader) GetServerConfig() (*ServerConfig, error) {
+	if l.serverConfigMap == nil {
+		return nil, fmt.Errorf("server_config map not loaded")
+	}
+
+	var key uint32 = 0
+	var config ServerConfig
+	if err := l.serverConfigMap.Lookup(&key, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }
 
 // === Helper Functions ===

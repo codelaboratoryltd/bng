@@ -417,7 +417,7 @@ See `docs/ebpf-dhcp-architecture.md` and `docs/ARCHITECTURE.md` for full details
 | Total Throughput | 50,000 req/sec | Combined |
 | Fast Path Latency | <100 μs | P99, eBPF histogram |
 | Slow Path Latency | <10 ms | P99, Prometheus |
-| Cache Hit Rate | >80% | Fast path / total |
+| Cache Hit Rate | >95% | Fast path / total |
 
 ### System Resources
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
 	"github.com/codelaboratoryltd/bng/pkg/nat"
+	"github.com/codelaboratoryltd/bng/pkg/nexus"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -40,6 +41,9 @@ type Server struct {
 
 	// NAT integration (optional)
 	natMgr *nat.Manager
+
+	// Nexus integration (optional) - for centralized IP allocation
+	nexusClient *nexus.Client
 
 	// Enable RADIUS auth (if false, all MACs are accepted)
 	radiusAuthEnabled bool
@@ -116,6 +120,12 @@ func (s *Server) SetNATManager(nm *nat.Manager) {
 	s.natMgr = nm
 }
 
+// SetNexusClient sets the Nexus client for centralized IP allocation.
+// When set, IP allocation happens via Nexus (hashring-based) instead of local pools.
+func (s *Server) SetNexusClient(nc *nexus.Client) {
+	s.nexusClient = nc
+}
+
 // generateSessionID generates a unique RADIUS session ID
 func generateSessionID() string {
 	b := make([]byte, 8)
@@ -140,6 +150,29 @@ func (s *Server) Start(ctx context.Context) error {
 		zap.String("interface", s.iface),
 		zap.String("server_ip", s.serverIP.String()),
 	)
+
+	// Configure eBPF fast path with server info
+	if s.loader != nil {
+		iface, err := net.InterfaceByName(s.iface)
+		if err != nil {
+			s.logger.Warn("Failed to get interface for eBPF config",
+				zap.String("interface", s.iface),
+				zap.Error(err),
+			)
+		} else {
+			if err := s.loader.SetServerConfig(iface.HardwareAddr, s.serverIP, iface.Index); err != nil {
+				s.logger.Warn("Failed to set eBPF server config",
+					zap.Error(err),
+				)
+			} else {
+				s.logger.Info("eBPF fast path configured",
+					zap.String("server_mac", iface.HardwareAddr.String()),
+					zap.String("server_ip", s.serverIP.String()),
+					zap.Int("ifindex", iface.Index),
+				)
+			}
+		}
+	}
 
 	// Start lease cleanup goroutine
 	go s.leaseCleanup(ctx)
@@ -222,10 +255,11 @@ func (s *Server) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCP
 // handleDiscover handles DHCP DISCOVER - allocates new IP
 func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	mac := req.ClientHWAddr
+	macStr := mac.String()
 
 	// Check if client already has a lease
 	s.leasesMu.RLock()
-	existingLease := s.leases[mac.String()]
+	existingLease := s.leases[macStr]
 	s.leasesMu.RUnlock()
 
 	var ip net.IP
@@ -238,18 +272,59 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		poolID = existingLease.PoolID
 		pool = s.poolMgr.GetPool(poolID)
 	} else {
-		// Classify client and get pool
-		pool = s.poolMgr.ClassifyClient(mac)
-		if pool == nil {
-			return nil, fmt.Errorf("no pool available for client %s", mac)
+		// Try Nexus first for centralized IP allocation
+		if s.nexusClient != nil {
+			if sub, ok := s.nexusClient.GetSubscriberByMAC(macStr); ok {
+				// Subscriber found in Nexus
+				if sub.IPv4Addr != "" {
+					// Already has IP allocated (at RADIUS time)
+					ip = net.ParseIP(sub.IPv4Addr)
+					s.logger.Debug("Using Nexus-allocated IP",
+						zap.String("mac", macStr),
+						zap.String("ip", sub.IPv4Addr),
+						zap.String("subscriber_id", sub.ID),
+					)
+				} else {
+					// Allocate IP via Nexus (hashring-based)
+					allocatedIP, err := s.nexusClient.AllocateIPForSubscriber(context.Background(), sub.ID)
+					if err != nil {
+						s.logger.Warn("Nexus IP allocation failed, falling back to local pool",
+							zap.String("mac", macStr),
+							zap.Error(err),
+						)
+					} else {
+						ip = net.ParseIP(allocatedIP)
+						s.logger.Info("Allocated IP via Nexus",
+							zap.String("mac", macStr),
+							zap.String("ip", allocatedIP),
+							zap.String("subscriber_id", sub.ID),
+						)
+					}
+				}
+			}
 		}
-		poolID = pool.ID
 
-		// Allocate IP from pool
-		var err error
-		ip, err = pool.Allocate(mac)
-		if err != nil {
-			return nil, fmt.Errorf("failed to allocate IP: %w", err)
+		// Fall back to local pool if Nexus didn't provide an IP
+		if ip == nil {
+			// Classify client and get pool
+			pool = s.poolMgr.ClassifyClient(mac)
+			if pool == nil {
+				return nil, fmt.Errorf("no pool available for client %s", mac)
+			}
+			poolID = pool.ID
+
+			// Allocate IP from local pool
+			var err error
+			ip, err = pool.Allocate(mac)
+			if err != nil {
+				return nil, fmt.Errorf("failed to allocate IP: %w", err)
+			}
+		} else if pool == nil {
+			// Got IP from Nexus, use default pool for metadata
+			pool = s.poolMgr.ClassifyClient(mac)
+			if pool != nil {
+				poolID = pool.ID
+			}
 		}
 	}
 

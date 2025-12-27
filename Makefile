@@ -1,20 +1,8 @@
-.PHONY: help cluster-create cluster-delete cluster-start cluster-stop tilt-up tilt-down hydrate clean test lint build
+.PHONY: help clean test lint build build-ebpf build-docker tidy demo
 
 # Default target
 help:
-	@echo "BNG Development Makefile"
-	@echo ""
-	@echo "Cluster Management:"
-	@echo "  make cluster-create    - Create k3d cluster with Cilium"
-	@echo "  make cluster-delete    - Delete k3d cluster"
-	@echo "  make cluster-start     - Start existing cluster"
-	@echo "  make cluster-stop      - Stop cluster (preserves state)"
-	@echo "  make cluster-restart   - Restart cluster"
-	@echo ""
-	@echo "Development:"
-	@echo "  make tilt-up           - Start Tilt development environment"
-	@echo "  make tilt-down         - Stop Tilt (keeps cluster running)"
-	@echo "  make hydrate           - Regenerate Helm templates"
+	@echo "BNG Makefile"
 	@echo ""
 	@echo "Build & Test:"
 	@echo "  make build             - Build BNG binary (includes eBPF)"
@@ -24,49 +12,14 @@ help:
 	@echo "  make lint              - Run linters"
 	@echo "  make tidy              - Tidy Go modules"
 	@echo ""
+	@echo "Demo:"
+	@echo "  make demo              - Run demo with 10 subscribers"
+	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean             - Remove build artifacts"
 	@echo ""
-
-# -----------------------------------------------------------------------------
-# Cluster Management
-# -----------------------------------------------------------------------------
-
-cluster-create:
-	@echo "Creating k3d cluster 'bng'..."
-	k3d cluster create -c clusters/bng-local/k3d-config.yaml
-
-cluster-delete:
-	@echo "Deleting k3d cluster 'bng'..."
-	k3d cluster delete bng
-
-cluster-start:
-	@echo "Starting k3d cluster 'bng'..."
-	k3d cluster start bng
-
-cluster-stop:
-	@echo "Stopping k3d cluster 'bng'..."
-	k3d cluster stop bng
-
-cluster-restart: cluster-stop cluster-start
-	@echo "Cluster restarted"
-
-# -----------------------------------------------------------------------------
-# Development
-# -----------------------------------------------------------------------------
-
-tilt-up:
-	@echo "Starting Tilt development environment..."
-	@echo "This will create the cluster if it doesn't exist"
-	tilt up --context k3d-bng
-
-tilt-down:
-	@echo "Stopping Tilt (cluster will remain running)..."
-	tilt down
-
-hydrate:
-	@echo "Regenerating Helm templates via helmfile..."
-	cd charts && ./hydrate.sh
+	@echo "For local development with k3d/Tilt, use bng-edge-infra repo."
+	@echo ""
 
 # -----------------------------------------------------------------------------
 # Build & Test
@@ -79,12 +32,12 @@ build-ebpf:
 build: build-ebpf
 	@echo "Building BNG binary..."
 	go build -o bin/bng ./cmd/bng
-	@echo "✓ Binary built: bin/bng"
+	@echo "Binary built: bin/bng"
 
 build-docker:
 	@echo "Building BNG Docker image..."
-	docker build -t localhost:5555/bng:latest .
-	@echo "✓ Docker image built"
+	docker build -t ghcr.io/codelaboratoryltd/bng:latest .
+	@echo "Docker image built"
 
 test:
 	@echo "Running Go tests..."
@@ -102,7 +55,15 @@ lint:
 tidy:
 	@echo "Tidying Go modules..."
 	go mod tidy
-	@echo "✓ Go modules tidied"
+	@echo "Go modules tidied"
+
+# -----------------------------------------------------------------------------
+# Demo
+# -----------------------------------------------------------------------------
+
+demo: build
+	@echo "Running BNG demo..."
+	./bin/bng demo --subscribers=10 --duration=30s
 
 # -----------------------------------------------------------------------------
 # Cleanup
@@ -112,17 +73,4 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf bin/
 	rm -rf bpf/*.o
-	rm -rf charts/cilium charts/prometheus charts/grafana
-	@echo "✓ Cleaned"
-
-# -----------------------------------------------------------------------------
-# Convenience Targets
-# -----------------------------------------------------------------------------
-
-# Fresh start - delete everything and rebuild
-fresh: cluster-delete tilt-up
-	@echo "✓ Fresh environment created"
-
-# Quick restart without deleting cluster
-restart: tilt-down tilt-up
-	@echo "✓ Development environment restarted"
+	@echo "Cleaned"
