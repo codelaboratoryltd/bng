@@ -528,6 +528,64 @@ BACKHAUL FIBER (OLT → Aggregation)
 
 ## Bootstrap Flow (Zero-Touch Provisioning)
 
+### ZTP DHCP: How OLT-BNG Discovers Nexus
+
+Nexus can run a DHCP server specifically for OLT-BNG device provisioning. This eliminates
+manual configuration of Nexus URLs on each OLT-BNG device.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     ZTP DHCP Flow (Management Network)                    │
+│                                                                           │
+│  ┌─────────────┐    DHCP DISCOVER     ┌─────────────┐                    │
+│  │   OLT-BNG   │ ─────────────────────│   Nexus     │                    │
+│  │  (new box)  │                      │   Server    │                    │
+│  └─────────────┘                      └─────────────┘                    │
+│         │                                    │                            │
+│         │  DHCP OFFER:                       │                            │
+│         │  - IP: 192.168.100.50              │                            │
+│         │  - Gateway: 192.168.100.1          │                            │
+│         │  - DNS: 8.8.8.8, 8.8.4.4           │                            │
+│         │  - Option 224: http://192.168.100.1:9000  ◄── Nexus URL       │
+│         │  - Option 43 (vendor): TLV with Nexus URL                      │
+│         │◄────────────────────────────────────│                            │
+│         │                                    │                            │
+│         │  DHCP REQUEST                      │                            │
+│         │ ──────────────────────────────────►│                            │
+│         │                                    │                            │
+│         │  DHCP ACK                          │                            │
+│         │◄────────────────────────────────────│                            │
+│         │                                    │                            │
+│         │  OLT-BNG now has:                  │                            │
+│         │  1. Management IP                  │                            │
+│         │  2. Nexus URL (from DHCP option)   │                            │
+│         │  3. Ready to register              │                            │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Nexus ZTP DHCP Options:**
+
+| Option | Purpose | Example Value |
+|--------|---------|---------------|
+| Standard options | IP, gateway, DNS, lease | Per standard DHCP |
+| Option 224 (private) | Nexus URL (simple string) | `http://192.168.100.1:9000` |
+| Option 43 (vendor) | Nexus URL (TLV format) | Type=1, Value=URL |
+
+**Starting Nexus with ZTP:**
+
+```bash
+# Enable ZTP DHCP server on eth0 for management network
+nexus serve \
+  --ztp \
+  --ztp-interface eth0 \
+  --ztp-network 192.168.100.0/24 \
+  --ztp-gateway 192.168.100.1 \
+  --ztp-dns 8.8.8.8,8.8.4.4
+```
+
+### Standard Bootstrap Flow
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │ 1. OLT HARDWARE BOOT                                            │
@@ -539,8 +597,9 @@ BACKHAUL FIBER (OLT → Aggregation)
 ┌─────────────────────────────────────────────────────────────────┐
 │ 2. BOOTSTRAP PHASE                                              │
 │    ├── Read serial from DMI/SMBIOS                             │
-│    ├── Get IP via DHCP on management VLAN                      │
-│    └── Resolve Nexus server                                   │
+│    ├── ZTP DHCP: Get IP + Nexus URL from DHCP                  │
+│    │   OR: Read Nexus URL from local config                    │
+│    └── Proceed to registration                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼

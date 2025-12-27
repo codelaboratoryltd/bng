@@ -12,12 +12,22 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/codelaboratoryltd/bng/pkg/ztp"
 )
 
 // BootstrapConfig contains settings for the bootstrap process.
 type BootstrapConfig struct {
 	// NexusServerURL is the URL of the Nexus server bootstrap API.
+	// If empty and ZTPEnabled=true, this will be discovered via DHCP.
 	NexusServerURL string `yaml:"nexus_server_url"`
+
+	// ZTPEnabled enables Zero Touch Provisioning via DHCP.
+	// When enabled, the management IP and Nexus URL are obtained from DHCP.
+	ZTPEnabled bool `yaml:"ztp_enabled"`
+
+	// ZTPInterface is the management interface for ZTP DHCP discovery.
+	ZTPInterface string `yaml:"ztp_interface"`
 
 	// SerialOverride allows overriding the hardware serial (for testing).
 	SerialOverride string `yaml:"serial_override,omitempty"`
@@ -32,6 +42,7 @@ type BootstrapConfig struct {
 // DefaultBootstrapConfig returns sensible defaults.
 func DefaultBootstrapConfig() BootstrapConfig {
 	return BootstrapConfig{
+		ZTPInterface:  "eth0",
 		RetryInterval: 30 * time.Second,
 		MaxRetries:    0, // Infinite retries
 	}
@@ -365,4 +376,64 @@ func (b *Bootstrap) sendRegistration(ctx context.Context, req *RegistrationReque
 	}
 
 	return &regResp, nil
+}
+
+// DiscoverNexusURL uses ZTP DHCP to discover the Nexus server URL.
+// This also obtains and configures the management IP address.
+func (b *Bootstrap) DiscoverNexusURL(ctx context.Context) (string, error) {
+	if !b.config.ZTPEnabled {
+		if b.config.NexusServerURL == "" {
+			return "", fmt.Errorf("ZTP not enabled and no Nexus URL configured")
+		}
+		return b.config.NexusServerURL, nil
+	}
+
+	b.logger.Info("Starting ZTP discovery",
+		zap.String("interface", b.config.ZTPInterface),
+	)
+
+	ztpClient := ztp.NewClient(b.config.ZTPInterface)
+
+	// Perform DHCP discovery with timeout
+	discoverCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	result, err := ztpClient.Discover(discoverCtx)
+	if err != nil {
+		return "", fmt.Errorf("ZTP DHCP discovery failed: %w", err)
+	}
+
+	if result.NexusURL == "" {
+		return "", fmt.Errorf("ZTP DHCP response did not contain Nexus URL")
+	}
+
+	b.logger.Info("ZTP discovery successful",
+		zap.String("ip", result.IP.String()),
+		zap.String("nexus_url", result.NexusURL),
+	)
+
+	// Configure the network interface
+	if err := ztpClient.Configure(result); err != nil {
+		b.logger.Warn("Failed to configure network interface", zap.Error(err))
+		// Continue anyway - interface may already be configured
+	}
+
+	// Update the config with discovered URL
+	b.config.NexusServerURL = result.NexusURL
+
+	return result.NexusURL, nil
+}
+
+// BootstrapWithZTP performs the full bootstrap process including ZTP discovery.
+func (b *Bootstrap) BootstrapWithZTP(ctx context.Context) (*RegistrationResponse, error) {
+	// Step 1: Discover Nexus URL via ZTP DHCP (if enabled)
+	nexusURL, err := b.DiscoverNexusURL(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to discover Nexus: %w", err)
+	}
+
+	b.logger.Info("Using Nexus server", zap.String("url", nexusURL))
+
+	// Step 2: Register with Nexus
+	return b.RegisterWithRetry(ctx)
 }
