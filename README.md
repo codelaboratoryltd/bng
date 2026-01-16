@@ -256,4 +256,6 @@ VPP is the right choice for core aggregation (100+ Gbps), but eBPF/XDP is simple
 
 ## License
 
-Copyright (c) 2025 Code Laboratory Ltd. All Rights Reserved.
+BSL 1.1 (Business Source License) - see [LICENSE](LICENSE)
+
+Converts to Apache 2.0 on January 1, 2030.
