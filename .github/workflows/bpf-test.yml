@@ -24,7 +24,9 @@ jobs:
             libbpf-dev \
             linux-headers-$(uname -r) \
             linux-tools-$(uname -r) \
-            linux-tools-common
+            linux-tools-common \
+            gcc-multilib \
+            libc6-dev-i386
 
       - name: Build BPF programs
         run: |
