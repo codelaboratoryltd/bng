@@ -49,6 +49,21 @@ var _ = Describe("NAT Manager", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(mgr).NotTo(BeNil())
 			})
+
+			It("should accept feature flags", func() {
+				cfg := nat.ManagerConfig{
+					Interface:        "eth0",
+					EnableEIM:        true,
+					EnableHairpin:    true,
+					EnableFTPALG:     true,
+					EnablePortParity: true,
+				}
+
+				mgr, err := nat.NewManager(cfg, logger)
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(mgr).NotTo(BeNil())
+			})
 		})
 
 		Context("when creating a manager with invalid config", func() {
@@ -107,6 +122,28 @@ var _ = Describe("NAT Manager", func() {
 			})
 		})
 
+		Context("when adding IP range", func() {
+			It("should add a range of IPs", func() {
+				startIP := net.ParseIP("203.0.113.1")
+				endIP := net.ParseIP("203.0.113.5")
+
+				err := mgr.AddPublicIPRange(startIP, endIP)
+
+				Expect(err).NotTo(HaveOccurred())
+				stats := mgr.GetPoolStats()
+				Expect(stats).To(HaveLen(5))
+			})
+
+			It("should reject invalid range", func() {
+				startIP := net.ParseIP("203.0.113.10")
+				endIP := net.ParseIP("203.0.113.5")
+
+				err := mgr.AddPublicIPRange(startIP, endIP)
+
+				Expect(err).To(HaveOccurred())
+			})
+		})
+
 		Context("when getting pool stats", func() {
 			It("should return empty slice when no IPs added", func() {
 				stats := mgr.GetPoolStats()
@@ -124,7 +161,7 @@ var _ = Describe("NAT Manager", func() {
 		})
 	})
 
-	Describe("NAT Allocation", func() {
+	Describe("NAT Allocation (Port Block Allocation - RFC 6431)", func() {
 		var mgr *nat.Manager
 
 		BeforeEach(func() {
@@ -156,6 +193,15 @@ var _ = Describe("NAT Manager", func() {
 				Expect(allocation.PortEnd).To(BeNumerically(">", allocation.PortStart))
 			})
 
+			It("should assign a subscriber ID", func() {
+				subscriberIP := net.ParseIP("10.0.1.100")
+
+				allocation, err := mgr.AllocateNAT(subscriberIP)
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(allocation.SubscriberID).To(BeNumerically(">", 0))
+			})
+
 			It("should return same allocation for same subscriber", func() {
 				subscriberIP := net.ParseIP("10.0.1.100")
 
@@ -167,6 +213,7 @@ var _ = Describe("NAT Manager", func() {
 				Expect(alloc1.PublicIP.String()).To(Equal(alloc2.PublicIP.String()))
 				Expect(alloc1.PortStart).To(Equal(alloc2.PortStart))
 				Expect(alloc1.PortEnd).To(Equal(alloc2.PortEnd))
+				Expect(alloc1.SubscriberID).To(Equal(alloc2.SubscriberID))
 			})
 
 			It("should allocate different port ranges for different subscribers", func() {
@@ -178,6 +225,8 @@ var _ = Describe("NAT Manager", func() {
 
 				// Port ranges should not overlap
 				Expect(alloc1.PortEnd).To(BeNumerically("<", alloc2.PortStart))
+				// Different subscriber IDs
+				Expect(alloc1.SubscriberID).NotTo(Equal(alloc2.SubscriberID))
 			})
 
 			It("should reject IPv6 addresses", func() {
@@ -321,11 +370,12 @@ var _ = Describe("NAT Manager", func() {
 	Describe("Allocation Struct", func() {
 		It("should contain all required fields", func() {
 			alloc := &nat.Allocation{
-				PrivateIP: net.ParseIP("10.0.1.100"),
-				PublicIP:  net.ParseIP("203.0.113.1"),
-				PortStart: 10000,
-				PortEnd:   10999,
-				PoolIndex: 0,
+				PrivateIP:    net.ParseIP("10.0.1.100"),
+				PublicIP:     net.ParseIP("203.0.113.1"),
+				PortStart:    10000,
+				PortEnd:      10999,
+				PoolIndex:    0,
+				SubscriberID: 1,
 			}
 
 			Expect(alloc.PrivateIP.String()).To(Equal("10.0.1.100"))
@@ -333,6 +383,7 @@ var _ = Describe("NAT Manager", func() {
 			Expect(alloc.PortStart).To(Equal(uint16(10000)))
 			Expect(alloc.PortEnd).To(Equal(uint16(10999)))
 			Expect(alloc.PoolIndex).To(Equal(0))
+			Expect(alloc.SubscriberID).To(Equal(uint32(1)))
 		})
 
 		It("should track allocation time", func() {
@@ -373,7 +424,42 @@ var _ = Describe("NAT Manager", func() {
 			Entry("valid: minimal config", nat.ManagerConfig{Interface: "eth0"}, true),
 			Entry("valid: custom ports", nat.ManagerConfig{Interface: "eth0", PortsPerSubscriber: 500}, true),
 			Entry("valid: custom port range", nat.ManagerConfig{Interface: "eth0", PortRangeStart: 5000, PortRangeEnd: 60000}, true),
+			Entry("valid: with EIM enabled", nat.ManagerConfig{Interface: "eth0", EnableEIM: true}, true),
+			Entry("valid: with hairpin enabled", nat.ManagerConfig{Interface: "eth0", EnableHairpin: true}, true),
+			Entry("valid: with ALGs enabled", nat.ManagerConfig{Interface: "eth0", EnableFTPALG: true, EnableSIPALG: true}, true),
 			Entry("invalid: no interface", nat.ManagerConfig{}, false),
 		)
+	})
+
+	Describe("NAT Configuration Flags", func() {
+		It("should have correct flag values", func() {
+			Expect(nat.NATFlagEIMEnabled).To(Equal(uint32(0x01)))
+			Expect(nat.NATFlagEIFEnabled).To(Equal(uint32(0x02)))
+			Expect(nat.NATFlagHairpinEnabled).To(Equal(uint32(0x04)))
+			Expect(nat.NATFlagALGFTP).To(Equal(uint32(0x08)))
+			Expect(nat.NATFlagALGSIP).To(Equal(uint32(0x10)))
+			Expect(nat.NATFlagPortParity).To(Equal(uint32(0x20)))
+			Expect(nat.NATFlagPortContiguity).To(Equal(uint32(0x40)))
+		})
+	})
+
+	Describe("NAT Log Event Types", func() {
+		It("should have correct event type values", func() {
+			Expect(nat.NATLogSessionCreate).To(Equal(uint32(1)))
+			Expect(nat.NATLogSessionDelete).To(Equal(uint32(2)))
+			Expect(nat.NATLogPortBlockAssign).To(Equal(uint32(3)))
+			Expect(nat.NATLogPortBlockRelease).To(Equal(uint32(4)))
+			Expect(nat.NATLogPortExhaustion).To(Equal(uint32(5)))
+			Expect(nat.NATLogHairpin).To(Equal(uint32(6)))
+			Expect(nat.NATLogALGTrigger).To(Equal(uint32(7)))
+		})
+	})
+
+	Describe("ALG Types", func() {
+		It("should have correct ALG type values", func() {
+			Expect(nat.ALGTypeFTP).To(Equal(uint8(1)))
+			Expect(nat.ALGTypeSIP).To(Equal(uint8(2)))
+			Expect(nat.ALGTypeRTSP).To(Equal(uint8(3)))
+		})
 	})
 })
