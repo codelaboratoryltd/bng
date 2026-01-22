@@ -50,6 +50,32 @@ const (
 	EventSystemStart EventType = "SYSTEM_START"
 	EventSystemStop  EventType = "SYSTEM_STOP"
 	EventSystemError EventType = "SYSTEM_ERROR"
+
+	// Device registration events
+	EventDeviceRegistrationAttempt EventType = "DEVICE_REGISTRATION_ATTEMPT"
+	EventDeviceRegistrationSuccess EventType = "DEVICE_REGISTRATION_SUCCESS"
+	EventDeviceRegistrationFailure EventType = "DEVICE_REGISTRATION_FAILURE"
+	EventDeviceDeregistration      EventType = "DEVICE_DEREGISTRATION"
+
+	// API security events
+	EventAPIAuthAttempt  EventType = "API_AUTH_ATTEMPT"
+	EventAPIAuthSuccess  EventType = "API_AUTH_SUCCESS"
+	EventAPIAuthFailure  EventType = "API_AUTH_FAILURE"
+	EventAPIAccessDenied EventType = "API_ACCESS_DENIED"
+	EventAPIRateLimited  EventType = "API_RATE_LIMITED"
+
+	// Suspicious activity events
+	EventSuspiciousActivity    EventType = "SUSPICIOUS_ACTIVITY"
+	EventBruteForceDetected    EventType = "BRUTE_FORCE_DETECTED"
+	EventUnauthorizedAccess    EventType = "UNAUTHORIZED_ACCESS"
+	EventMACSpoof              EventType = "MAC_SPOOF_DETECTED"
+	EventIPSpoof               EventType = "IP_SPOOF_DETECTED"
+	EventDHCPStarvationAttempt EventType = "DHCP_STARVATION_ATTEMPT"
+
+	// Resource events (allocation/deallocation)
+	EventResourceAllocated   EventType = "RESOURCE_ALLOCATED"
+	EventResourceDeallocated EventType = "RESOURCE_DEALLOCATED"
+	EventResourceExhausted   EventType = "RESOURCE_EXHAUSTED"
 )
 
 // Event represents a single audit event.
@@ -112,6 +138,24 @@ type Event struct {
 	// Admin context
 	AdminUser   string `json:"admin_user,omitempty"`
 	AdminAction string `json:"admin_action,omitempty"`
+
+	// Security context (for API and access events)
+	ActorID      string `json:"actor_id,omitempty"`      // User or service ID that initiated the action
+	ActorType    string `json:"actor_type,omitempty"`    // "user", "service", "device", "system"
+	SourceIP     net.IP `json:"source_ip,omitempty"`     // IP address of the request origin
+	UserAgent    string `json:"user_agent,omitempty"`    // HTTP user agent or client identifier
+	RequestID    string `json:"request_id,omitempty"`    // Unique request identifier for tracing
+	APIEndpoint  string `json:"api_endpoint,omitempty"`  // API endpoint accessed
+	HTTPMethod   string `json:"http_method,omitempty"`   // HTTP method used
+	HTTPStatus   int    `json:"http_status,omitempty"`   // HTTP response status code
+	ResourceType string `json:"resource_type,omitempty"` // Type of resource affected (pool, allocation, etc.)
+	ResourceID   string `json:"resource_id,omitempty"`   // ID of the resource affected
+
+	// Suspicious activity context
+	ThreatType   string    `json:"threat_type,omitempty"`   // Type of threat detected
+	ThreatScore  int       `json:"threat_score,omitempty"`  // Risk score 0-100
+	FailureCount int       `json:"failure_count,omitempty"` // Number of failures for brute force detection
+	BlockedUntil time.Time `json:"blocked_until,omitempty"` // Time until which the actor is blocked
 
 	// Additional metadata
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -216,6 +260,44 @@ func (e EventType) GetSeverity() Severity {
 		return SeverityInfo
 	case EventNATMapping, EventNATExpiry:
 		return SeverityDebug
+	// Device registration events
+	case EventDeviceRegistrationSuccess:
+		return SeverityInfo
+	case EventDeviceRegistrationAttempt:
+		return SeverityInfo
+	case EventDeviceRegistrationFailure:
+		return SeverityWarning
+	case EventDeviceDeregistration:
+		return SeverityNotice
+	// API security events
+	case EventAPIAuthAttempt:
+		return SeverityInfo
+	case EventAPIAuthSuccess:
+		return SeverityInfo
+	case EventAPIAuthFailure:
+		return SeverityWarning
+	case EventAPIAccessDenied:
+		return SeverityWarning
+	case EventAPIRateLimited:
+		return SeverityWarning
+	// Suspicious activity events (high severity)
+	case EventSuspiciousActivity:
+		return SeverityWarning
+	case EventBruteForceDetected:
+		return SeverityAlert
+	case EventUnauthorizedAccess:
+		return SeverityAlert
+	case EventMACSpoof:
+		return SeverityCritical
+	case EventIPSpoof:
+		return SeverityCritical
+	case EventDHCPStarvationAttempt:
+		return SeverityAlert
+	// Resource events
+	case EventResourceAllocated, EventResourceDeallocated:
+		return SeverityInfo
+	case EventResourceExhausted:
+		return SeverityWarning
 	default:
 		return SeverityInfo
 	}
@@ -240,6 +322,14 @@ func (e EventType) Category() string {
 		return "admin"
 	case EventSystemStart, EventSystemStop, EventSystemError:
 		return "system"
+	case EventDeviceRegistrationAttempt, EventDeviceRegistrationSuccess, EventDeviceRegistrationFailure, EventDeviceDeregistration:
+		return "device"
+	case EventAPIAuthAttempt, EventAPIAuthSuccess, EventAPIAuthFailure, EventAPIAccessDenied, EventAPIRateLimited:
+		return "api"
+	case EventSuspiciousActivity, EventBruteForceDetected, EventUnauthorizedAccess, EventMACSpoof, EventIPSpoof, EventDHCPStarvationAttempt:
+		return "security"
+	case EventResourceAllocated, EventResourceDeallocated, EventResourceExhausted:
+		return "resource"
 	default:
 		return "other"
 	}

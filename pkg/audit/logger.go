@@ -71,11 +71,15 @@ func DefaultConfig() Config {
 		FlushInterval:        5 * time.Second,
 		DefaultRetentionDays: 90,
 		RetentionByCategory: map[string]int{
-			"session": 365, // 1 year for session logs
-			"nat":     90,  // 90 days for NAT logs (legal requirement)
-			"auth":    365, // 1 year for auth logs
-			"dhcp":    30,  // 30 days for DHCP logs
-			"admin":   730, // 2 years for admin actions
+			"session":  365, // 1 year for session logs
+			"nat":      90,  // 90 days for NAT logs (legal requirement)
+			"auth":     365, // 1 year for auth logs
+			"dhcp":     30,  // 30 days for DHCP logs
+			"admin":    730, // 2 years for admin actions
+			"device":   365, // 1 year for device registration
+			"api":      365, // 1 year for API access logs
+			"security": 730, // 2 years for security events (compliance)
+			"resource": 365, // 1 year for resource allocation
 		},
 		MinSeverity: SeverityDebug,
 	}
@@ -327,6 +331,63 @@ func (l *Logger) LogAuth(auth *AuthEvent, success bool) {
 		event.Type = EventAuthFailure
 	}
 	l.LogEvent(&event)
+}
+
+// LogDeviceRegistration logs a device registration event.
+func (l *Logger) LogDeviceRegistration(event *Event, success bool) {
+	event.ID = "" // Clear ID so a new one is generated
+	if success {
+		event.Type = EventDeviceRegistrationSuccess
+	} else {
+		event.Type = EventDeviceRegistrationFailure
+	}
+	l.LogEvent(event)
+}
+
+// LogAPIAccess logs an API access event.
+func (l *Logger) LogAPIAccess(event *Event) {
+	event.ID = "" // Clear ID so a new one is generated
+	// Event type should be set by caller (APIAuthSuccess, APIAuthFailure, etc.)
+	if event.Type == "" {
+		event.Type = EventAPIAuthAttempt
+	}
+	l.LogEvent(event)
+}
+
+// LogSuspiciousActivity logs a suspicious activity event.
+func (l *Logger) LogSuspiciousActivity(event *Event, threatType string, score int) {
+	event.ID = "" // Clear ID so a new one is generated
+	event.Type = EventSuspiciousActivity
+	event.ThreatType = threatType
+	event.ThreatScore = score
+	l.LogEvent(event)
+}
+
+// LogBruteForce logs a brute force detection event.
+func (l *Logger) LogBruteForce(event *Event, failureCount int) {
+	event.ID = "" // Clear ID so a new one is generated
+	event.Type = EventBruteForceDetected
+	event.ThreatType = "brute_force"
+	event.FailureCount = failureCount
+	l.LogEvent(event)
+}
+
+// LogResourceAllocation logs a resource allocation or deallocation event.
+func (l *Logger) LogResourceAllocation(event *Event, allocated bool) {
+	event.ID = "" // Clear ID so a new one is generated
+	if allocated {
+		event.Type = EventResourceAllocated
+	} else {
+		event.Type = EventResourceDeallocated
+	}
+	l.LogEvent(event)
+}
+
+// LogConfigChange logs a configuration change event.
+func (l *Logger) LogConfigChange(event *Event) {
+	event.ID = "" // Clear ID so a new one is generated
+	event.Type = EventConfigChange
+	l.LogEvent(event)
 }
 
 // prepareEvent fills in default fields.
@@ -598,6 +659,41 @@ func FormatSyslog(event *Event) string {
 	}
 	if event.ErrorMessage != "" {
 		msg += fmt.Sprintf(" error=%q", event.ErrorMessage)
+	}
+
+	// Security context fields
+	if event.ActorID != "" {
+		msg += fmt.Sprintf(" actor=%s", event.ActorID)
+	}
+	if event.ActorType != "" {
+		msg += fmt.Sprintf(" actor_type=%s", event.ActorType)
+	}
+	if event.SourceIP != nil {
+		msg += fmt.Sprintf(" source_ip=%s", event.SourceIP)
+	}
+	if event.APIEndpoint != "" {
+		msg += fmt.Sprintf(" endpoint=%s", event.APIEndpoint)
+	}
+	if event.HTTPMethod != "" {
+		msg += fmt.Sprintf(" method=%s", event.HTTPMethod)
+	}
+	if event.HTTPStatus != 0 {
+		msg += fmt.Sprintf(" status=%d", event.HTTPStatus)
+	}
+	if event.ResourceType != "" {
+		msg += fmt.Sprintf(" resource_type=%s", event.ResourceType)
+	}
+	if event.ResourceID != "" {
+		msg += fmt.Sprintf(" resource_id=%s", event.ResourceID)
+	}
+	if event.ThreatType != "" {
+		msg += fmt.Sprintf(" threat=%s", event.ThreatType)
+	}
+	if event.ThreatScore > 0 {
+		msg += fmt.Sprintf(" threat_score=%d", event.ThreatScore)
+	}
+	if event.FailureCount > 0 {
+		msg += fmt.Sprintf(" failures=%d", event.FailureCount)
 	}
 
 	return msg
