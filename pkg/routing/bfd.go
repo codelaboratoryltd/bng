@@ -453,7 +453,10 @@ func (m *BFDManager) vtysh(command string) (string, error) {
 
 	args := []string{"-c", command}
 	if m.config.VtyshSocket != "" {
-		args = append([]string{"-N", m.config.VtyshSocket}, args...)
+		// Use --vty_socket to specify the VTY socket directory.
+		// Note: -N is for pathspace/namespace isolation, not socket paths.
+		// See: https://docs.frrouting.org/en/latest/setup.html
+		args = append([]string{"--vty_socket", m.config.VtyshSocket}, args...)
 	}
 
 	cmd := exec.CommandContext(ctx, m.config.VtyshPath, args...)

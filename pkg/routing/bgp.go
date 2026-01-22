@@ -558,7 +558,10 @@ func (b *BGPController) vtysh(command string) (string, error) {
 
 	args := []string{"-c", command}
 	if b.config.VtyshSocket != "" {
-		args = append([]string{"-N", b.config.VtyshSocket}, args...)
+		// Use --vty_socket to specify the VTY socket directory.
+		// Note: -N is for pathspace/namespace isolation, not socket paths.
+		// See: https://docs.frrouting.org/en/latest/setup.html
+		args = append([]string{"--vty_socket", b.config.VtyshSocket}, args...)
 	}
 
 	cmd := exec.CommandContext(ctx, b.config.VtyshPath, args...)

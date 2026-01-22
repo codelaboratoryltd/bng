@@ -51,7 +51,10 @@ func TestSubscriberRouteManager_InjectRoute(t *testing.T) {
 	config := routing.DefaultSubscriberRouteConfig()
 	config.LocalAS = 64500
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -63,7 +66,7 @@ func TestSubscriberRouteManager_InjectRoute(t *testing.T) {
 	ctx := context.Background()
 	ip := net.ParseIP("10.0.1.100")
 
-	err := manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
+	err = manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
 	if err != nil {
 		t.Fatalf("InjectRoute failed: %v", err)
 	}
@@ -94,7 +97,10 @@ func TestSubscriberRouteManager_WithdrawRoute(t *testing.T) {
 	config := routing.DefaultSubscriberRouteConfig()
 	config.LocalAS = 64500
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -107,7 +113,7 @@ func TestSubscriberRouteManager_WithdrawRoute(t *testing.T) {
 	ip := net.ParseIP("10.0.1.100")
 
 	// First inject a route
-	err := manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
+	err = manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
 	if err != nil {
 		t.Fatalf("InjectRoute failed: %v", err)
 	}
@@ -136,7 +142,10 @@ func TestSubscriberRouteManager_IdempotentInjection(t *testing.T) {
 	config := routing.DefaultSubscriberRouteConfig()
 	config.LocalAS = 64500
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -149,7 +158,7 @@ func TestSubscriberRouteManager_IdempotentInjection(t *testing.T) {
 	ip := net.ParseIP("10.0.1.100")
 
 	// Inject twice
-	err := manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
+	err = manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
 	if err != nil {
 		t.Fatalf("First InjectRoute failed: %v", err)
 	}
@@ -171,7 +180,10 @@ func TestSubscriberRouteManager_IdempotentWithdrawal(t *testing.T) {
 	config := routing.DefaultSubscriberRouteConfig()
 	config.LocalAS = 64500
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -184,7 +196,7 @@ func TestSubscriberRouteManager_IdempotentWithdrawal(t *testing.T) {
 	ip := net.ParseIP("10.0.1.100")
 
 	// Inject a route
-	err := manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
+	err = manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
 	if err != nil {
 		t.Fatalf("InjectRoute failed: %v", err)
 	}
@@ -206,7 +218,10 @@ func TestSubscriberRouteManager_SessionIDMismatch(t *testing.T) {
 	config := routing.DefaultSubscriberRouteConfig()
 	config.LocalAS = 64500
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -219,7 +234,7 @@ func TestSubscriberRouteManager_SessionIDMismatch(t *testing.T) {
 	ip := net.ParseIP("10.0.1.100")
 
 	// Inject with session-1
-	err := manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
+	err = manager.InjectRoute(ctx, "session-1", "subscriber-1", ip, "residential")
 	if err != nil {
 		t.Fatalf("InjectRoute failed: %v", err)
 	}
@@ -244,7 +259,10 @@ func TestSubscriberRouteManager_BulkInject(t *testing.T) {
 	config.BulkBatchSize = 10
 	config.BulkBatchDelay = 0 // No delay for testing
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -265,7 +283,7 @@ func TestSubscriberRouteManager_BulkInject(t *testing.T) {
 		}
 	}
 
-	err := manager.BulkInjectRoutes(ctx, routes)
+	err = manager.BulkInjectRoutes(ctx, routes)
 	if err != nil {
 		t.Fatalf("BulkInjectRoutes failed: %v", err)
 	}
@@ -287,7 +305,10 @@ func TestSubscriberRouteManager_Stats(t *testing.T) {
 	config := routing.DefaultSubscriberRouteConfig()
 	config.LocalAS = 64500
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -301,8 +322,7 @@ func TestSubscriberRouteManager_Stats(t *testing.T) {
 	// Inject a few routes
 	for i := 0; i < 5; i++ {
 		ip := net.IPv4(10, 0, 1, byte(i+1))
-		err := manager.InjectRoute(ctx, "session", "subscriber", ip, "")
-		if err != nil {
+		if err := manager.InjectRoute(ctx, "session", "subscriber", ip, ""); err != nil {
 			t.Fatalf("InjectRoute failed: %v", err)
 		}
 	}
@@ -332,7 +352,10 @@ func TestSubscriberRouteConfig_Communities(t *testing.T) {
 		"business":    "64500:102",
 	}
 
-	manager := routing.NewSubscriberRouteManager(config, nil, logger)
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	manager.SetFRRExecutor(executor)
 
@@ -345,7 +368,7 @@ func TestSubscriberRouteConfig_Communities(t *testing.T) {
 
 	// Inject with residential class
 	ip1 := net.ParseIP("10.0.1.1")
-	err := manager.InjectRoute(ctx, "s1", "sub1", ip1, "residential")
+	err = manager.InjectRoute(ctx, "s1", "sub1", ip1, "residential")
 	if err != nil {
 		t.Fatalf("InjectRoute failed: %v", err)
 	}
@@ -381,5 +404,26 @@ func TestDefaultSubscriberRouteConfig(t *testing.T) {
 
 	if config.BulkBatchSize == 0 {
 		t.Error("BulkBatchSize should not be 0")
+	}
+}
+
+func TestSubscriberRouteManager_LocalASValidation(t *testing.T) {
+	logger := zap.NewNop()
+	config := routing.DefaultSubscriberRouteConfig()
+	// LocalAS is 0 by default, should fail without BGPController
+
+	_, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err == nil {
+		t.Error("NewSubscriberRouteManager should fail when LocalAS is 0 and BGPController is nil")
+	}
+
+	// With LocalAS set, should succeed
+	config.LocalAS = 64500
+	manager, err := routing.NewSubscriberRouteManager(config, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager should succeed with LocalAS set: %v", err)
+	}
+	if manager == nil {
+		t.Error("manager should not be nil")
 	}
 }

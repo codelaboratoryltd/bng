@@ -16,7 +16,10 @@ func TestSessionRouteIntegration_OnSessionActivate(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -30,7 +33,7 @@ func TestSessionRouteIntegration_OnSessionActivate(t *testing.T) {
 
 	// Simulate session activation
 	ip := net.ParseIP("10.0.1.100")
-	err := integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
+	err = integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
 	if err != nil {
 		t.Fatalf("OnSessionActivate failed: %v", err)
 	}
@@ -62,7 +65,10 @@ func TestSessionRouteIntegration_OnSessionTerminate(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -76,7 +82,7 @@ func TestSessionRouteIntegration_OnSessionTerminate(t *testing.T) {
 
 	// Activate then terminate
 	ip := net.ParseIP("10.0.1.100")
-	err := integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
+	err = integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
 	if err != nil {
 		t.Fatalf("OnSessionActivate failed: %v", err)
 	}
@@ -105,7 +111,10 @@ func TestSessionRouteIntegration_DisabledInjection(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -120,7 +129,7 @@ func TestSessionRouteIntegration_DisabledInjection(t *testing.T) {
 
 	// Attempt activation
 	ip := net.ParseIP("10.0.1.100")
-	err := integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
+	err = integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
 	if err != nil {
 		t.Fatalf("OnSessionActivate should not fail: %v", err)
 	}
@@ -138,7 +147,10 @@ func TestSessionRouteIntegration_DisabledWithdrawal(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -153,7 +165,7 @@ func TestSessionRouteIntegration_DisabledWithdrawal(t *testing.T) {
 
 	// Activate then terminate
 	ip := net.ParseIP("10.0.1.100")
-	err := integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
+	err = integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "residential")
 	if err != nil {
 		t.Fatalf("OnSessionActivate failed: %v", err)
 	}
@@ -176,7 +188,10 @@ func TestSessionRouteIntegration_OnSessionStateChange(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -191,7 +206,7 @@ func TestSessionRouteIntegration_OnSessionStateChange(t *testing.T) {
 	ip := net.ParseIP("10.0.1.100")
 
 	// Test state change to active
-	err := integration.OnSessionStateChange("session-1", "subscriber-1", "establishing", "active", ip, nil, "residential", "")
+	err = integration.OnSessionStateChange("session-1", "subscriber-1", "establishing", "active", ip, nil, "residential", "")
 	if err != nil {
 		t.Fatalf("OnSessionStateChange to active failed: %v", err)
 	}
@@ -219,7 +234,10 @@ func TestSessionRouteIntegration_RecoverRoutes(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -248,7 +266,7 @@ func TestSessionRouteIntegration_RecoverRoutes(t *testing.T) {
 
 	// Recover routes (should re-inject all tracked routes)
 	ctx := context.Background()
-	err := integration.RecoverRoutes(ctx)
+	err = integration.RecoverRoutes(ctx)
 	if err != nil {
 		t.Fatalf("RecoverRoutes failed: %v", err)
 	}
@@ -267,7 +285,10 @@ func TestSessionRouteIntegration_GetTrackedSessions(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -318,7 +339,10 @@ func TestSessionEventAdapter(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -357,7 +381,10 @@ func TestSessionRouteIntegration_Timeouts(t *testing.T) {
 	// Create route manager
 	routeConfig := routing.DefaultSubscriberRouteConfig()
 	routeConfig.LocalAS = 64500
-	routeManager := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	routeManager, err := routing.NewSubscriberRouteManager(routeConfig, nil, logger)
+	if err != nil {
+		t.Fatalf("NewSubscriberRouteManager failed: %v", err)
+	}
 	executor := newMockFRRExecutor()
 	routeManager.SetFRRExecutor(executor)
 	routeManager.Start()
@@ -373,7 +400,7 @@ func TestSessionRouteIntegration_Timeouts(t *testing.T) {
 
 	// Should succeed quickly
 	ip := net.ParseIP("10.0.1.100")
-	err := integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "")
+	err = integration.OnSessionActivate("session-1", "subscriber-1", ip, nil, "")
 	if err != nil {
 		t.Fatalf("OnSessionActivate failed: %v", err)
 	}

@@ -130,7 +130,12 @@ type FRRExecutor interface {
 }
 
 // NewSubscriberRouteManager creates a new subscriber route manager.
-func NewSubscriberRouteManager(config SubscriberRouteConfig, bgp *BGPController, logger *zap.Logger) *SubscriberRouteManager {
+func NewSubscriberRouteManager(config SubscriberRouteConfig, bgp *BGPController, logger *zap.Logger) (*SubscriberRouteManager, error) {
+	// Validate LocalAS - required for route injection when not using BGPController
+	if config.LocalAS == 0 && bgp == nil {
+		return nil, fmt.Errorf("LocalAS cannot be 0 when BGPController is not provided")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &SubscriberRouteManager{
@@ -141,7 +146,7 @@ func NewSubscriberRouteManager(config SubscriberRouteConfig, bgp *BGPController,
 		pendingOps:   make(chan *routeOperation, 10000),
 		ctx:          ctx,
 		cancel:       cancel,
-	}
+	}, nil
 }
 
 // SetFRRExecutor sets a custom FRR executor (useful for testing).
@@ -231,6 +236,14 @@ func (m *SubscriberRouteManager) InjectRoute(ctx context.Context, sessionID, sub
 		m.stats.InjectionFailures++
 		m.mu.Unlock()
 
+		// Note: The route remains in activeRoutes cache despite the FRR injection failure.
+		// This is intentional - the retry mechanism (retryWorker) will attempt to inject
+		// the route again. Keeping it in cache ensures:
+		// 1. Duplicate injection requests for the same IP are handled correctly
+		// 2. The route state is preserved for retry attempts
+		// 3. Session-to-route mapping remains consistent
+		// If max retries are exceeded, the route stays in cache but won't be in FRR.
+		// Use ReconcileRoutes() after FRR recovery to re-sync all cached routes.
 		m.queueRetry(&routeOperation{
 			Type:      routeOpInject,
 			Route:     route,
