@@ -316,6 +316,16 @@ func (a *IPAllocator) Stats() (allocated, total uint64, utilization float64) {
 	return alloc, tot, util
 }
 
+// IsIPv6 returns true if this allocator is for IPv6 addresses/prefixes.
+func (a *IPAllocator) IsIPv6() bool {
+	return a.isIPv6
+}
+
+// PrefixLength returns the prefix length allocated to each subscriber.
+func (a *IPAllocator) PrefixLength() int {
+	return a.prefixLen
+}
+
 // ListAllocations returns all current allocations.
 func (a *IPAllocator) ListAllocations() []Allocation {
 	a.mu.RLock()
@@ -338,11 +348,6 @@ func (a *IPAllocator) BaseNetwork() *net.IPNet {
 		IP:   a.baseIP,
 		Mask: a.baseMask,
 	}
-}
-
-// PrefixLength returns the allocation prefix length.
-func (a *IPAllocator) PrefixLength() int {
-	return a.prefixLen
 }
 
 // findFreeIndex finds the first unallocated prefix index.

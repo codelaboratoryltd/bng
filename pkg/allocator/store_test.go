@@ -255,4 +255,135 @@ var _ = Describe("PoolAllocator", func() {
 		Expect(total).To(Equal(uint64(256)))
 		Expect(util).To(BeNumerically("~", 3.9, 0.1))
 	})
+
+	It("should default to IPv4 pool type", func() {
+		Expect(poolAlloc.PoolType()).To(Equal(allocator.PoolTypeIPv4Address))
+		Expect(poolAlloc.IsIPv6()).To(BeFalse())
+	})
+})
+
+var _ = Describe("PoolAllocator IPv6", func() {
+	var (
+		store *allocator.MemoryAllocationStore
+		ctx   context.Context
+	)
+
+	BeforeEach(func() {
+		store = allocator.NewMemoryAllocationStore()
+		ctx = context.Background()
+	})
+
+	It("should auto-detect IPv6 address pool type for /64 allocations", func() {
+		poolAlloc, err := allocator.NewPoolAllocatorWithType(allocator.PoolAllocatorConfig{
+			PoolID:       "ipv6-addr-pool",
+			BaseNetwork:  "2001:db8::/48",
+			PrefixLength: 64,
+			Store:        store,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(poolAlloc.PoolType()).To(Equal(allocator.PoolTypeIPv6Address))
+		Expect(poolAlloc.IsIPv6()).To(BeTrue())
+		Expect(poolAlloc.PrefixLength()).To(Equal(64))
+	})
+
+	It("should auto-detect IPv6 prefix delegation pool type for /56 allocations", func() {
+		poolAlloc, err := allocator.NewPoolAllocatorWithType(allocator.PoolAllocatorConfig{
+			PoolID:       "ipv6-pd-pool",
+			BaseNetwork:  "2001:db8::/48",
+			PrefixLength: 56,
+			Store:        store,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(poolAlloc.PoolType()).To(Equal(allocator.PoolTypeIPv6Prefix))
+		Expect(poolAlloc.IsIPv6()).To(BeTrue())
+		Expect(poolAlloc.PrefixLength()).To(Equal(56))
+	})
+
+	It("should allocate with DHCPv6 options", func() {
+		poolAlloc, err := allocator.NewPoolAllocatorWithType(allocator.PoolAllocatorConfig{
+			PoolID:       "ipv6-pd-pool",
+			BaseNetwork:  "2001:db8::/48",
+			PrefixLength: 56,
+			PoolType:     allocator.PoolTypeIPv6Prefix,
+			Store:        store,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		prefix, err := poolAlloc.AllocateWithOptions(ctx, allocator.AllocateOptions{
+			SubscriberID: "sub-1",
+			DUID:         "00:01:00:01:aa:bb:cc:dd:ee:ff",
+			IAID:         12345,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(prefix).NotTo(BeNil())
+
+		// Verify allocation record has DHCPv6 fields
+		allocs, err := store.GetBySubscriber(ctx, "sub-1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(allocs).To(HaveLen(1))
+		Expect(allocs[0].DUID).To(Equal("00:01:00:01:aa:bb:cc:dd:ee:ff"))
+		Expect(allocs[0].IAID).To(Equal(uint32(12345)))
+		Expect(allocs[0].PoolType).To(Equal(allocator.PoolTypeIPv6Prefix))
+	})
+})
+
+var _ = Describe("GetByPoolType", func() {
+	var (
+		store *allocator.MemoryAllocationStore
+		ctx   context.Context
+	)
+
+	BeforeEach(func() {
+		store = allocator.NewMemoryAllocationStore()
+		ctx = context.Background()
+	})
+
+	It("should filter allocations by pool type", func() {
+		// Create IPv4 pool
+		ipv4Pool, err := allocator.NewPoolAllocator("ipv4-pool", "10.0.1.0/24", 32, store)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Create IPv6 address pool
+		ipv6AddrPool, err := allocator.NewPoolAllocatorWithType(allocator.PoolAllocatorConfig{
+			PoolID:       "ipv6-addr-pool",
+			BaseNetwork:  "2001:db8::/48",
+			PrefixLength: 64,
+			Store:        store,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Create IPv6 prefix delegation pool
+		ipv6PDPool, err := allocator.NewPoolAllocatorWithType(allocator.PoolAllocatorConfig{
+			PoolID:       "ipv6-pd-pool",
+			BaseNetwork:  "2001:db8:1::/48",
+			PrefixLength: 56,
+			Store:        store,
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Allocate from all pools
+		ipv4Pool.Allocate(ctx, "sub-1", "")
+		ipv4Pool.Allocate(ctx, "sub-2", "")
+		ipv6AddrPool.Allocate(ctx, "sub-1", "")
+		ipv6PDPool.AllocateWithOptions(ctx, allocator.AllocateOptions{
+			SubscriberID: "sub-1",
+			DUID:         "test-duid",
+		})
+
+		// Query by pool type
+		ipv4Allocs, err := store.GetByPoolType(ctx, allocator.PoolTypeIPv4Address)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ipv4Allocs).To(HaveLen(2))
+
+		ipv6AddrAllocs, err := store.GetByPoolType(ctx, allocator.PoolTypeIPv6Address)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ipv6AddrAllocs).To(HaveLen(1))
+
+		ipv6PDAllocs, err := store.GetByPoolType(ctx, allocator.PoolTypeIPv6Prefix)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ipv6PDAllocs).To(HaveLen(1))
+		Expect(ipv6PDAllocs[0].DUID).To(Equal("test-duid"))
+	})
 })
