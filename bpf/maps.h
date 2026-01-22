@@ -9,6 +9,7 @@
 /* Maximum entries in maps */
 #define MAX_SUBSCRIBERS 1000000
 #define MAX_POOLS 10000
+#define MAX_VLAN_SUBSCRIBERS 100000
 
 /* Subscriber pool assignment
  * Key: MAC address (u64, 6 bytes padded)
@@ -17,7 +18,7 @@
 struct pool_assignment {
 	__u32 pool_id;          /* Which IP pool */
 	__u32 allocated_ip;     /* Currently assigned IP (network byte order) */
-	__u32 vlan_id;          /* VLAN tag for subscriber */
+	__u32 vlan_id;          /* VLAN tag for subscriber (deprecated, use s_tag/c_tag) */
 	__u8  client_class;     /* Residential=1, Business=2, etc. */
 	__u64 lease_expiry;     /* Unix timestamp (seconds) */
 	__u8  flags;            /* Static IP flag, etc. */
@@ -30,6 +31,31 @@ struct {
 	__type(key, __u64);   /* MAC address */
 	__type(value, struct pool_assignment);
 } subscriber_pools SEC(".maps");
+
+/* QinQ (802.1ad) VLAN key for subscriber lookup
+ * Used in European PoI deployments where subscribers are identified by
+ * S-VLAN (outer) + C-VLAN (inner) combination instead of MAC
+ */
+struct vlan_key {
+	__u16 s_tag;           /* Service VLAN (outer, 802.1ad) */
+	__u16 c_tag;           /* Customer VLAN (inner, 802.1Q) */
+} __attribute__((packed));
+
+/* VLAN-based subscriber assignment
+ * Key: vlan_key (S-TAG, C-TAG tuple)
+ * Value: pool_assignment struct
+ *
+ * This map is used for QinQ deployments where each subscriber is identified
+ * by their unique VLAN combination. In this model:
+ * - S-TAG identifies the service provider or PoI
+ * - C-TAG identifies the individual subscriber within that service
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_VLAN_SUBSCRIBERS);
+	__type(key, struct vlan_key);
+	__type(value, struct pool_assignment);
+} vlan_subscriber_pools SEC(".maps");
 
 /* IP pool metadata
  * Key: pool_id (u32)

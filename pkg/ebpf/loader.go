@@ -18,11 +18,19 @@ import (
 type PoolAssignment struct {
 	PoolID      uint32
 	AllocatedIP uint32 // Network byte order
-	VlanID      uint32
+	VlanID      uint32 // Deprecated: use VLANKey for QinQ
 	ClientClass uint8
 	LeaseExpiry uint64 // Unix timestamp (seconds)
 	Flags       uint8
 	_           [3]byte // Padding
+}
+
+// VLANKey represents a QinQ VLAN key for subscriber lookup (mirrors eBPF struct)
+// Used in European PoI deployments where subscribers are identified by
+// S-VLAN (outer) + C-VLAN (inner) combination
+type VLANKey struct {
+	STag uint16 // Service VLAN (outer, 802.1ad)
+	CTag uint16 // Customer VLAN (inner, 802.1Q)
 }
 
 // IPPool represents an IP pool configuration (mirrors eBPF struct)
@@ -62,12 +70,13 @@ type Loader struct {
 	xdpMode link.XDPAttachFlags
 
 	// eBPF resources
-	collection      *ebpf.Collection
-	xdpLink         link.Link
-	subscriberPools *ebpf.Map
-	ipPools         *ebpf.Map
-	statsMap        *ebpf.Map
-	serverConfigMap *ebpf.Map
+	collection          *ebpf.Collection
+	xdpLink             link.Link
+	subscriberPools     *ebpf.Map
+	vlanSubscriberPools *ebpf.Map // QinQ VLAN-based subscriber lookup
+	ipPools             *ebpf.Map
+	statsMap            *ebpf.Map
+	serverConfigMap     *ebpf.Map
 }
 
 // LoaderOption configures the Loader
@@ -159,6 +168,12 @@ func (l *Loader) Load(ctx context.Context) error {
 	l.subscriberPools = coll.Maps["subscriber_pools"]
 	if l.subscriberPools == nil {
 		return fmt.Errorf("subscriber_pools map not found")
+	}
+
+	// QinQ VLAN-based subscriber map (optional - not all deployments use QinQ)
+	l.vlanSubscriberPools = coll.Maps["vlan_subscriber_pools"]
+	if l.vlanSubscriberPools != nil {
+		l.logger.Info("QinQ VLAN subscriber map loaded")
 	}
 
 	l.ipPools = coll.Maps["ip_pools"]
@@ -282,6 +297,49 @@ func (l *Loader) GetSubscriber(mac uint64) (*PoolAssignment, error) {
 	}
 
 	return &assignment, nil
+}
+
+// === QinQ VLAN-based Subscriber Operations ===
+
+// AddVLANSubscriber adds a subscriber to the QinQ VLAN-based fast path cache
+// Used in European PoI deployments where subscribers are identified by S-TAG/C-TAG
+func (l *Loader) AddVLANSubscriber(sTag, cTag uint16, assignment *PoolAssignment) error {
+	if l.vlanSubscriberPools == nil {
+		return fmt.Errorf("vlan_subscriber_pools map not loaded (QinQ not enabled)")
+	}
+
+	key := VLANKey{STag: sTag, CTag: cTag}
+	return l.vlanSubscriberPools.Put(&key, assignment)
+}
+
+// RemoveVLANSubscriber removes a subscriber from the QinQ VLAN-based cache
+func (l *Loader) RemoveVLANSubscriber(sTag, cTag uint16) error {
+	if l.vlanSubscriberPools == nil {
+		return fmt.Errorf("vlan_subscriber_pools map not loaded (QinQ not enabled)")
+	}
+
+	key := VLANKey{STag: sTag, CTag: cTag}
+	return l.vlanSubscriberPools.Delete(&key)
+}
+
+// GetVLANSubscriber looks up a subscriber by VLAN tags
+func (l *Loader) GetVLANSubscriber(sTag, cTag uint16) (*PoolAssignment, error) {
+	if l.vlanSubscriberPools == nil {
+		return nil, fmt.Errorf("vlan_subscriber_pools map not loaded (QinQ not enabled)")
+	}
+
+	key := VLANKey{STag: sTag, CTag: cTag}
+	var assignment PoolAssignment
+	if err := l.vlanSubscriberPools.Lookup(&key, &assignment); err != nil {
+		return nil, err
+	}
+
+	return &assignment, nil
+}
+
+// HasVLANSupport returns true if the QinQ VLAN subscriber map is loaded
+func (l *Loader) HasVLANSupport() bool {
+	return l.vlanSubscriberPools != nil
 }
 
 // AddPool adds an IP pool configuration
