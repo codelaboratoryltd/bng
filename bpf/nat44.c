@@ -409,8 +409,6 @@ static __always_inline __u16 allocate_port_from_block(struct port_block *block, 
                                                        __u16 orig_port, __u32 internal_ip, __u8 protocol) {
 	/* Use atomic fetch-and-add for port allocation to ensure atomicity */
 	__u16 port = __sync_fetch_and_add(&block->next_port, 1);
-	__u16 start_port = port;
-	__u16 block_size = block->port_end - block->port_start + 1;
 
 	/* If preserving parity (for RTP/RTCP), ensure even/odd matches */
 	__u8 orig_parity = orig_port & 1;

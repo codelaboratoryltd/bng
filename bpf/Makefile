@@ -12,7 +12,9 @@ OUTPUT := .
 BPF_PROGRAMS := dhcp_fastpath.bpf.o qos_ratelimit.bpf.o nat44.bpf.o antispoof.bpf.o
 
 # Compiler flags
-CFLAGS := -O2 -g -Wall -Werror \
+# Note: -Wno-pass-failed silences warnings when #pragma unroll can't be honored
+# (common on arm64 or older clang versions) - the loops still work correctly
+CFLAGS := -O2 -g -Wall -Werror -Wno-pass-failed \
 	-target bpf \
 	-D__TARGET_ARCH_$(ARCH) \
 	-I/usr/include/$(shell uname -m)-linux-gnu
