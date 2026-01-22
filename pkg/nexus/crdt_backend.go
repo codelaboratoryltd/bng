@@ -1,3 +1,5 @@
+//go:build clset
+
 package nexus
 
 import (
@@ -7,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	clset "example.com/clset"
+	"github.com/codelaboratoryltd/bng/pkg/nexus/clset"
 	ds "github.com/ipfs/go-datastore"
 	dsquery "github.com/ipfs/go-datastore/query"
 	badgerds "github.com/ipfs/go-ds-badger4"
