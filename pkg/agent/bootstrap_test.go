@@ -28,8 +28,8 @@ func TestNewBootstrap(t *testing.T) {
 	config := DefaultBootstrapConfig()
 	config.NexusServerURL = "http://nexus.example.com:9000"
 
-	bootstrap := NewBootstrap(config, logger)
-
+	bootstrap, err := NewBootstrap(config, logger)
+	require.NoError(t, err)
 	require.NotNil(t, bootstrap)
 	assert.Equal(t, config, bootstrap.config)
 	assert.NotNil(t, bootstrap.logger)
@@ -84,7 +84,8 @@ func TestBootstrap_Register_Success(t *testing.T) {
 		MaxRetries:     3,
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, err := NewBootstrap(config, logger)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	resp, err := bootstrap.Register(ctx)
@@ -112,7 +113,8 @@ func TestBootstrap_Register_Pending(t *testing.T) {
 		SerialOverride: "TEST-SERIAL-001",
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, err := NewBootstrap(config, logger)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	resp, err := bootstrap.Register(ctx)
@@ -135,7 +137,8 @@ func TestBootstrap_Register_ServerError(t *testing.T) {
 		SerialOverride: "TEST-SERIAL-001",
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, err := NewBootstrap(config, logger)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	resp, err := bootstrap.Register(ctx)
@@ -162,7 +165,8 @@ func TestBootstrap_RegisterWithRetry_MaxRetries(t *testing.T) {
 		MaxRetries:     3,
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, err := NewBootstrap(config, logger)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	resp, err := bootstrap.RegisterWithRetry(ctx)
@@ -192,7 +196,8 @@ func TestBootstrap_RegisterWithRetry_ContextCancellation(t *testing.T) {
 		MaxRetries:     0,
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, bootstrapErr := NewBootstrap(config, logger)
+	require.NoError(t, bootstrapErr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -222,7 +227,8 @@ func TestBootstrap_RegisterWithRetry_Rejected(t *testing.T) {
 		MaxRetries:     3,
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, err := NewBootstrap(config, logger)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	resp, err := bootstrap.RegisterWithRetry(ctx)
@@ -240,7 +246,8 @@ func TestBootstrap_DiscoverNexusURL_ZTPDisabled(t *testing.T) {
 		NexusServerURL: "http://configured.nexus.com:9000",
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, err := NewBootstrap(config, logger)
+	require.NoError(t, err)
 
 	ctx := context.Background()
 	url, err := bootstrap.DiscoverNexusURL(ctx)
@@ -257,7 +264,8 @@ func TestBootstrap_DiscoverNexusURL_ZTPDisabledNoURL(t *testing.T) {
 		NexusServerURL: "",
 	}
 
-	bootstrap := NewBootstrap(config, logger)
+	bootstrap, bootstrapErr := NewBootstrap(config, logger)
+	require.NoError(t, bootstrapErr)
 
 	ctx := context.Background()
 	url, err := bootstrap.DiscoverNexusURL(ctx)

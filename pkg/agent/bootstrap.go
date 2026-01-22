@@ -41,6 +41,10 @@ type BootstrapConfig struct {
 
 	// Auth contains device authentication configuration.
 	Auth deviceauth.Config `yaml:"auth"`
+
+	// TLS contains TLS/certificate validation settings.
+	// By default, TLS certificate validation is ENABLED for security.
+	TLS TLSConfig `yaml:"tls"`
 }
 
 // DefaultBootstrapConfig returns sensible defaults.
@@ -50,6 +54,7 @@ func DefaultBootstrapConfig() BootstrapConfig {
 		RetryInterval: 30 * time.Second,
 		MaxRetries:    0, // Infinite retries
 		Auth:          deviceauth.DefaultConfig(),
+		TLS:           DefaultTLSConfig(),
 	}
 }
 
@@ -62,14 +67,42 @@ type Bootstrap struct {
 }
 
 // NewBootstrap creates a new Bootstrap instance.
-func NewBootstrap(config BootstrapConfig, logger *zap.Logger) *Bootstrap {
-	return &Bootstrap{
+func NewBootstrap(config BootstrapConfig, logger *zap.Logger) (*Bootstrap, error) {
+	b := &Bootstrap{
 		config: config,
 		logger: logger,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
 	}
+
+	// Validate TLS config
+	if err := ValidateTLSConfig(config.TLS); err != nil {
+		return nil, fmt.Errorf("invalid TLS config: %w", err)
+	}
+
+	// Build TLS config
+	tlsConfig, err := config.TLS.BuildTLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build TLS config: %w", err)
+	}
+
+	// Warn if insecure mode is enabled
+	if config.TLS.InsecureSkipVerify {
+		logger.Warn("TLS certificate verification is DISABLED - connection is vulnerable to man-in-the-middle attacks",
+			zap.String("warning", "This should only be used for testing"),
+		)
+	}
+
+	// Create HTTP client with TLS config
+	transport := &http.Transport{}
+	if tlsConfig != nil {
+		transport.TLSClientConfig = tlsConfig
+	}
+
+	b.client = &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	return b, nil
 }
 
 // NewBootstrapWithAuth creates a new Bootstrap instance with device authentication.
