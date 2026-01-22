@@ -50,13 +50,38 @@ type PoolMode string
 
 const (
 	// PoolModeSession allocates at RADIUS time, no expiry.
-	// Used for: OLT-BNG with session-bound allocations.
+	// - Allocation: triggered by RADIUS Access-Accept
+	// - Expiry: none (session-bound, released on disconnect)
+	// - Renewals: DHCP renewals are read-only (return cached IP)
+	// - Store requirement: "read" mode sufficient (renewals work during partition)
+	// Used for: OLT-BNG with RADIUS authentication.
 	PoolModeSession PoolMode = "session"
 
 	// PoolModeLease allocates at DHCP time with epoch-based expiry.
-	// Used for: WiFi gateways with lease-bound allocations.
+	// - Allocation: triggered by DHCP DISCOVER
+	// - Expiry: epoch-based (reclaimed when epoch < current - grace period)
+	// - Renewals: update epoch to extend lease
+	// - Store requirement: "write" mode REQUIRED (must allocate during partition)
+	// Used for: WiFi gateways, DHCP-only deployments.
 	PoolModeLease PoolMode = "lease"
 )
+
+/*
+Mode/Capability Matrix:
+
+┌─────────────┬──────────────┬───────────────┬─────────────────────────┐
+│ Pool Mode   │ Store Mode   │ New Allocs    │ Renewals During Partition│
+├─────────────┼──────────────┼───────────────┼─────────────────────────┤
+│ session     │ read         │ Need RADIUS   │ ✅ Work (read-only)      │
+│ session     │ write        │ ✅ Local      │ ✅ Work (read-only)      │
+│ lease       │ read         │ ❌ Fail       │ ⚠️  Read works, no renew │
+│ lease       │ write        │ ✅ Local      │ ✅ Full functionality    │
+└─────────────┴──────────────┴───────────────┴─────────────────────────┘
+
+Recommendations:
+- OLT-BNG (session mode): "read" is sufficient, "write" for extra resilience
+- WiFi Gateway (lease mode): "write" is REQUIRED
+*/
 
 // Allocation represents a stored allocation record.
 type Allocation struct {

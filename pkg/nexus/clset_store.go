@@ -8,32 +8,54 @@ import (
 )
 
 // StoreMode determines how the store participates in the cluster.
+// This mirrors the nexus role system: "read", "write", "core".
 type StoreMode string
 
 const (
 	// StoreModeMemory is a local-only in-memory store (dev/testing).
 	StoreModeMemory StoreMode = "memory"
 
-	// StoreModeAuthoritative joins the CLSet hashring as a full participant.
-	// Can read/write locally, changes sync via CRDT gossip.
-	// Use for: OLT-BNG with partition resilience requirements.
-	StoreModeAuthoritative StoreMode = "authoritative"
+	// StoreModeWrite joins CLSet gossip AND the hashring (nexus role="write").
+	// - Joins libp2p gossip (receives/sends CRDT updates)
+	// - Joins hashring (owns pool ranges, can allocate locally)
+	// - Reads: local (from CRDT state)
+	// - Writes: local (syncs via gossip)
+	// - Partition behavior: full read/write capability
+	//
+	// REQUIRED for: Lease mode (WiFi) - must allocate new IPs during partitions.
+	// RECOMMENDED for: OLT-BNG - partition resilience for allocation at RADIUS time.
+	StoreModeWrite StoreMode = "write"
 
-	// StoreModeReplica caches locally but proxies writes to central nexus.
-	// Can read from cache, writes go to remote.
-	// Use for: WiFi gateways, simpler deployments.
-	StoreModeReplica StoreMode = "replica"
+	// StoreModeRead joins CLSet gossip but NOT the hashring (nexus role="read").
+	// - Joins libp2p gossip (receives CRDT updates in real-time)
+	// - Does NOT join hashring (owns no pools)
+	// - Reads: local (from CRDT state, always up-to-date via gossip)
+	// - Writes: returns ErrReadOnlyNode (must proxy to write node)
+	// - Partition behavior: reads work, writes fail
+	//
+	// SUFFICIENT for: Session mode (OLT-BNG) where renewals are read-only
+	//                 and new sessions need RADIUS anyway.
+	// NOT SUFFICIENT for: Lease mode (WiFi) - new devices need local allocation.
+	StoreModeRead StoreMode = "read"
 )
+
+// ErrReadOnlyNode is returned when a write operation is attempted on a read-only node.
+var ErrReadOnlyNode = fmt.Errorf("operation not allowed on read-only node")
 
 // CLSetConfig configures the distributed store.
 type CLSetConfig struct {
-	// Mode determines participation level
+	// Mode determines participation level: "memory", "read", or "write"
 	Mode StoreMode
 
 	// NodeID is this node's unique identifier in the cluster
 	NodeID string
 
-	// --- Authoritative mode settings ---
+	// NodeName identifies this node type (e.g., "BNG", "Nexus")
+	// Used for filtering in membership updates
+	NodeName string
+
+	// Topic is the pubsub topic for CRDT sync
+	Topic string
 
 	// ListenAddr is the libp2p listen address (e.g., "/ip4/0.0.0.0/tcp/9000")
 	ListenAddr string
@@ -41,37 +63,35 @@ type CLSetConfig struct {
 	// BootstrapPeers are initial peers to connect to
 	BootstrapPeers []string
 
-	// DataDir is where to persist CRDT state (empty = in-memory)
+	// DataDir is where to persist CRDT state (empty = in-memory badger)
 	DataDir string
 
-	// SyncInterval is how often to sync with peers
-	SyncInterval time.Duration
-
-	// --- Replica mode settings ---
-
-	// NexusURL is the central nexus server URL (for replica mode)
-	NexusURL string
-
-	// CacheTTL is how long to cache reads before refreshing
-	CacheTTL time.Duration
+	// RebroadcastInterval is how often to rebroadcast CRDT state
+	RebroadcastInterval time.Duration
 }
 
 // DefaultCLSetConfig returns sensible defaults.
 func DefaultCLSetConfig() CLSetConfig {
 	return CLSetConfig{
-		Mode:         StoreModeMemory,
-		SyncInterval: 5 * time.Second,
-		CacheTTL:     30 * time.Second,
+		Mode:                StoreModeMemory,
+		NodeName:            "BNG",
+		Topic:               "bng-state",
+		RebroadcastInterval: 5 * time.Second,
 	}
 }
 
 // CLSetStore implements Store with distributed state support.
-// Supports three modes: memory (local), authoritative (hashring), replica (client).
+// Supports three modes: memory (local), read (gossip, no hashring), write (gossip + hashring).
+//
+// Architecture matches nexus/internal/state:
+// - All non-memory modes use libp2p gossip for CRDT sync
+// - "read" nodes receive updates but return ErrReadOnlyNode on writes
+// - "write" nodes join the hashring and can allocate locally
 type CLSetStore struct {
 	config CLSetConfig
 	mode   StoreMode
 
-	// Local cache (used by all modes)
+	// Local cache (used by memory mode only)
 	mu    sync.RWMutex
 	cache map[string]cacheEntry
 
@@ -79,9 +99,11 @@ type CLSetStore struct {
 	watchersMu sync.RWMutex
 	watchers   map[string][]WatchCallback
 
-	// Mode-specific backends
-	authoritative authoritativeBackend // For authoritative mode
-	replica       replicaBackend       // For replica mode
+	// CRDT backend (used by read and write modes)
+	// Both modes use the same backend - the difference is:
+	// - read: returns ErrReadOnlyNode on Put/Delete
+	// - write: joins hashring, allows local writes
+	crdt crdtBackend
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -92,60 +114,39 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
-// authoritativeBackend is the interface for CLSet hashring participation.
-// This will be implemented by wrapping go-ds-crdt.
-type authoritativeBackend interface {
-	// Get retrieves from local CRDT state
+// crdtBackend is the interface for CLSet/CRDT participation.
+// Wraps go-ds-crdt with libp2p gossip, similar to nexus/internal/state.
+type crdtBackend interface {
+	// Get retrieves from local CRDT state (always local, synced via gossip)
 	Get(ctx context.Context, key string) ([]byte, error)
 
 	// Put writes to local CRDT (syncs to peers via gossip)
+	// Only allowed on write nodes; read nodes should check mode first
 	Put(ctx context.Context, key string, value []byte) error
 
 	// Delete removes from local CRDT
 	Delete(ctx context.Context, key string) error
 
-	// Query returns all matching keys from local CRDT
+	// Query returns all matching keys from local CRDT state
 	Query(ctx context.Context, prefix string) ([]KeyValue, error)
 
-	// Subscribe registers for CRDT change notifications
+	// Subscribe registers for CRDT change notifications (PutHook/DeleteHook)
 	Subscribe(prefix string, callback func(key string, value []byte, deleted bool))
 
-	// Members returns current cluster members
+	// Members returns current cluster members from CRDT membership
 	Members() []ClusterMember
 
-	// Close shuts down the CRDT node
-	Close() error
-}
-
-// replicaBackend is the interface for proxying to central nexus.
-type replicaBackend interface {
-	// Get fetches from remote nexus
-	Get(ctx context.Context, key string) ([]byte, error)
-
-	// Put writes to remote nexus
-	Put(ctx context.Context, key string, value []byte) error
-
-	// Delete removes from remote nexus
-	Delete(ctx context.Context, key string) error
-
-	// Query fetches matching keys from remote nexus
-	Query(ctx context.Context, prefix string) ([]KeyValue, error)
-
-	// Subscribe opens a watch stream to remote nexus
-	Subscribe(prefix string, callback func(key string, value []byte, deleted bool)) error
-
-	// Close shuts down the connection
+	// Close performs graceful shutdown of the CRDT node
 	Close() error
 }
 
 // ClusterMember represents a node in the CLSet cluster.
+// Mirrors nexus/internal/store.NodeMember.
 type ClusterMember struct {
-	NodeID   string
-	Addr     string
-	LastSeen time.Time
-	IsLeader bool     // For pools this node is authoritative for
-	Pools    []string // Pool IDs this node is authoritative for
-	Metadata map[string]string
+	NodeID     string
+	BestBefore time.Time         // When this node's membership expires
+	Role       string            // "read" or "write"
+	Metadata   map[string]string // Arbitrary metadata (name, version, etc.)
 }
 
 // NewCLSetStore creates a new distributed store.
@@ -165,21 +166,15 @@ func NewCLSetStore(config CLSetConfig) (*CLSetStore, error) {
 	case StoreModeMemory:
 		// No backend needed, just use cache
 
-	case StoreModeAuthoritative:
-		backend, err := newAuthoritativeBackend(config)
+	case StoreModeRead, StoreModeWrite:
+		// Both read and write modes use the same CRDT backend
+		// The difference is enforced at the Store level (read returns ErrReadOnlyNode)
+		backend, err := newCRDTBackend(config)
 		if err != nil {
 			cancel()
-			return nil, fmt.Errorf("create authoritative backend: %w", err)
+			return nil, fmt.Errorf("create CRDT backend: %w", err)
 		}
-		s.authoritative = backend
-
-	case StoreModeReplica:
-		backend, err := newReplicaBackend(config)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("create replica backend: %w", err)
-		}
-		s.replica = backend
+		s.crdt = backend
 
 	default:
 		cancel()
@@ -191,13 +186,6 @@ func NewCLSetStore(config CLSetConfig) (*CLSetStore, error) {
 
 // Get retrieves a value by key.
 func (s *CLSetStore) Get(ctx context.Context, key string) ([]byte, error) {
-	// Check cache first (for replica mode, respects TTL)
-	if s.mode == StoreModeReplica {
-		if entry, ok := s.getCached(key); ok {
-			return entry, nil
-		}
-	}
-
 	switch s.mode {
 	case StoreModeMemory:
 		s.mu.RLock()
@@ -208,17 +196,9 @@ func (s *CLSetStore) Get(ctx context.Context, key string) ([]byte, error) {
 		}
 		return entry.value, nil
 
-	case StoreModeAuthoritative:
-		return s.authoritative.Get(ctx, key)
-
-	case StoreModeReplica:
-		value, err := s.replica.Get(ctx, key)
-		if err != nil {
-			return nil, err
-		}
-		// Cache the result
-		s.setCache(key, value)
-		return value, nil
+	case StoreModeRead, StoreModeWrite:
+		// Both modes read from local CRDT state (synced via gossip)
+		return s.crdt.Get(ctx, key)
 	}
 
 	return nil, ErrNotFound
@@ -234,22 +214,16 @@ func (s *CLSetStore) Put(ctx context.Context, key string, value []byte) error {
 		s.notifyWatchers(key, value, false)
 		return nil
 
-	case StoreModeAuthoritative:
-		// Write to local CRDT, syncs via gossip
-		if err := s.authoritative.Put(ctx, key, value); err != nil {
-			return err
-		}
-		// Watchers notified via CRDT subscription
-		return nil
+	case StoreModeRead:
+		// Read-only nodes cannot write
+		return ErrReadOnlyNode
 
-	case StoreModeReplica:
-		// Proxy to remote nexus
-		if err := s.replica.Put(ctx, key, value); err != nil {
+	case StoreModeWrite:
+		// Write to local CRDT, syncs via gossip
+		if err := s.crdt.Put(ctx, key, value); err != nil {
 			return err
 		}
-		// Update local cache
-		s.setCache(key, value)
-		s.notifyWatchers(key, value, false)
+		// Watchers notified via CRDT PutHook
 		return nil
 	}
 
@@ -266,16 +240,13 @@ func (s *CLSetStore) Delete(ctx context.Context, key string) error {
 		s.notifyWatchers(key, nil, true)
 		return nil
 
-	case StoreModeAuthoritative:
-		return s.authoritative.Delete(ctx, key)
+	case StoreModeRead:
+		// Read-only nodes cannot delete
+		return ErrReadOnlyNode
 
-	case StoreModeReplica:
-		if err := s.replica.Delete(ctx, key); err != nil {
-			return err
-		}
-		s.invalidateCache(key)
-		s.notifyWatchers(key, nil, true)
-		return nil
+	case StoreModeWrite:
+		// Delete from local CRDT, syncs via gossip
+		return s.crdt.Delete(ctx, key)
 	}
 
 	return fmt.Errorf("unknown mode")
@@ -295,11 +266,9 @@ func (s *CLSetStore) Query(ctx context.Context, prefix string) ([]KeyValue, erro
 		}
 		return results, nil
 
-	case StoreModeAuthoritative:
-		return s.authoritative.Query(ctx, prefix)
-
-	case StoreModeReplica:
-		return s.replica.Query(ctx, prefix)
+	case StoreModeRead, StoreModeWrite:
+		// Both modes read from local CRDT state
+		return s.crdt.Query(ctx, prefix)
 	}
 
 	return nil, fmt.Errorf("unknown mode")
@@ -311,12 +280,10 @@ func (s *CLSetStore) Watch(prefix string, callback WatchCallback) {
 	s.watchers[prefix] = append(s.watchers[prefix], callback)
 	s.watchersMu.Unlock()
 
-	// For authoritative/replica modes, also subscribe to backend
+	// For CRDT modes, subscribe to backend (receives via PutHook/DeleteHook)
 	switch s.mode {
-	case StoreModeAuthoritative:
-		s.authoritative.Subscribe(prefix, callback)
-	case StoreModeReplica:
-		s.replica.Subscribe(prefix, callback)
+	case StoreModeRead, StoreModeWrite:
+		s.crdt.Subscribe(prefix, callback)
 	}
 }
 
@@ -325,25 +292,26 @@ func (s *CLSetStore) Close() error {
 	s.cancel()
 
 	switch s.mode {
-	case StoreModeAuthoritative:
-		if s.authoritative != nil {
-			return s.authoritative.Close()
-		}
-	case StoreModeReplica:
-		if s.replica != nil {
-			return s.replica.Close()
+	case StoreModeRead, StoreModeWrite:
+		if s.crdt != nil {
+			return s.crdt.Close()
 		}
 	}
 
 	return nil
 }
 
-// Members returns current cluster members (authoritative mode only).
+// Members returns current cluster members.
 func (s *CLSetStore) Members() []ClusterMember {
-	if s.mode == StoreModeAuthoritative && s.authoritative != nil {
-		return s.authoritative.Members()
+	if s.crdt != nil {
+		return s.crdt.Members()
 	}
 	return nil
+}
+
+// IsWriteNode returns true if this node can perform writes.
+func (s *CLSetStore) IsWriteNode() bool {
+	return s.mode == StoreModeWrite
 }
 
 // Mode returns the current store mode.
@@ -351,40 +319,7 @@ func (s *CLSetStore) Mode() StoreMode {
 	return s.mode
 }
 
-// --- Cache helpers ---
-
-func (s *CLSetStore) getCached(key string) ([]byte, bool) {
-	s.mu.RLock()
-	entry, ok := s.cache[key]
-	s.mu.RUnlock()
-
-	if !ok {
-		return nil, false
-	}
-
-	// Check TTL
-	if s.config.CacheTTL > 0 && time.Now().After(entry.expiresAt) {
-		return nil, false
-	}
-
-	return entry.value, true
-}
-
-func (s *CLSetStore) setCache(key string, value []byte) {
-	s.mu.Lock()
-	s.cache[key] = cacheEntry{
-		value:     value,
-		expiresAt: time.Now().Add(s.config.CacheTTL),
-	}
-	s.mu.Unlock()
-}
-
-func (s *CLSetStore) invalidateCache(key string) {
-	s.mu.Lock()
-	delete(s.cache, key)
-	s.mu.Unlock()
-}
-
+// notifyWatchers calls all matching watchers (used by memory mode).
 func (s *CLSetStore) notifyWatchers(key string, value []byte, deleted bool) {
 	s.watchersMu.RLock()
 	defer s.watchersMu.RUnlock()
@@ -398,23 +333,47 @@ func (s *CLSetStore) notifyWatchers(key string, value []byte, deleted bool) {
 	}
 }
 
-// --- Backend stubs (to be implemented) ---
+// --- CRDT Backend (to be implemented) ---
 
-func newAuthoritativeBackend(config CLSetConfig) (authoritativeBackend, error) {
+// newCRDTBackend creates a CRDT backend using go-ds-crdt + libp2p.
+// This mirrors the implementation in nexus/internal/state/state.go.
+func newCRDTBackend(config CLSetConfig) (crdtBackend, error) {
 	// TODO: Implement using go-ds-crdt + libp2p
-	// This will:
-	// 1. Create libp2p host with config.ListenAddr
-	// 2. Connect to config.BootstrapPeers
-	// 3. Create go-ds-crdt datastore with gossip pubsub
-	// 4. Set up membership tracking
-	return nil, fmt.Errorf("authoritative backend not yet implemented")
-}
-
-func newReplicaBackend(config CLSetConfig) (replicaBackend, error) {
-	// TODO: Implement using gRPC client to nexus
-	// This will:
-	// 1. Connect to config.NexusURL
-	// 2. Implement Get/Put/Delete/Query via gRPC
-	// 3. Open Watch stream for subscriptions
-	return nil, fmt.Errorf("replica backend not yet implemented")
+	//
+	// Implementation steps (see nexus/internal/state/state.go for reference):
+	//
+	// 1. Generate or load private key for libp2p identity
+	//
+	// 2. Create libp2p host:
+	//    listen, _ := multiaddr.NewMultiaddr(config.ListenAddr)
+	//    h, dht, _ := ipfslite.SetupLibp2p(ctx, privKey, nil, []multiaddr.Multiaddr{listen}, datastore, ...)
+	//
+	// 3. Create GossipSub pubsub:
+	//    ps, _ := libpubsub.NewGossipSub(ctx, h)
+	//
+	// 4. Create CRDT broadcaster:
+	//    pubsubBC, _ := crdt.NewPubSubBroadcaster(ctx, ps, config.Topic)
+	//
+	// 5. Create CRDT datastore with hooks:
+	//    opts := crdt.DefaultOptions()
+	//    opts.RebroadcastInterval = config.RebroadcastInterval
+	//    opts.PutHook = func(k ds.Key, v []byte) { /* notify watchers */ }
+	//    opts.DeleteHook = func(k ds.Key) { /* notify watchers */ }
+	//    opts.MembershipHook = func(members map[string]*pb.Participant) { /* track members */ }
+	//    crdtDatastore, _ := crdt.New(h, datastore, blockstore, namespace, dag, pubsubBC, opts)
+	//
+	// 6. Set node metadata:
+	//    crdtDatastore.UpdateMeta(ctx, map[string]string{
+	//        "name": config.NodeName,
+	//        "role": string(config.Mode),  // "read" or "write"
+	//    })
+	//
+	// 7. Bootstrap to peers:
+	//    for _, addr := range config.BootstrapPeers { h.Connect(ctx, peerInfo) }
+	//
+	// Key difference from nexus:
+	// - Nexus manages hashring internally for IP allocation
+	// - BNG just needs the CRDT store, hashring is handled by DistributedAllocator
+	//
+	return nil, fmt.Errorf("CRDT backend not yet implemented - see nexus/internal/state/state.go for reference")
 }
