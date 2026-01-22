@@ -527,16 +527,24 @@ func (l *Logger) writeWithRotation(data []byte) {
 		return
 	}
 
-	// Check if rotation is needed - move size check inside lock to prevent race
+	// For file-based logging with rotation, hold the lock during the entire
+	// write operation to prevent writing to a stale file handle if rotation
+	// happens concurrently
 	if l.maxFileSize > 0 && l.currentFile != nil {
 		l.rotationMu.Lock()
 		l.currentSize += int64(len(data))
 		if l.currentSize >= l.maxFileSize {
-			l.rotateFileLocked() // renamed to indicate lock is held
+			l.rotateFileLocked()
+		}
+		// Write while still holding the lock to ensure we write to the current file
+		if _, err := l.writer.Write(data); err != nil {
+			l.logger.Error("Failed to write NAT log entry", zap.Error(err))
 		}
 		l.rotationMu.Unlock()
+		return
 	}
 
+	// For non-file or non-rotating writes, no rotation lock needed
 	if _, err := l.writer.Write(data); err != nil {
 		l.logger.Error("Failed to write NAT log entry", zap.Error(err))
 	}

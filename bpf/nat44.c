@@ -397,8 +397,16 @@ static __always_inline void update_csum16(__u16 *csum, __u16 old_val, __u16 new_
 	*csum = csum_fold(sum);
 }
 
-/* Allocate a port from subscriber's port block (RFC 6431) */
-static __always_inline __u16 allocate_port_from_block(struct port_block *block, __u8 preserve_parity, __u16 orig_port) {
+/* Allocate a port from subscriber's port block (RFC 6431)
+ * Parameters:
+ *   block - Port block to allocate from
+ *   preserve_parity - Whether to preserve even/odd parity (for RTP/RTCP)
+ *   orig_port - Original internal port (used for parity matching)
+ *   internal_ip - Subscriber's internal/private IP (for EIM collision check)
+ *   protocol - IP protocol (TCP/UDP/ICMP) for EIM collision check
+ */
+static __always_inline __u16 allocate_port_from_block(struct port_block *block, __u8 preserve_parity,
+                                                       __u16 orig_port, __u32 internal_ip, __u8 protocol) {
 	/* Use atomic fetch-and-add for port allocation to ensure atomicity */
 	__u16 port = __sync_fetch_and_add(&block->next_port, 1);
 	__u16 start_port = port;
@@ -419,24 +427,22 @@ static __always_inline __u16 allocate_port_from_block(struct port_block *block, 
 			continue;
 		}
 
-		/* Check if port is already in use by looking up session map */
-		struct nat_key check_key = {
-			.src_ip = 0,  /* Will match any source */
-			.dst_ip = 0,
-			.src_port = bpf_htons(port),
-			.dst_port = 0,
-			.protocol = 0,
-		};
-		/* Note: In a full implementation, we would check the EIM table
-		 * or maintain a separate port bitmap for faster lookups */
+		/* Check if this internal IP:port:protocol already has an EIM mapping.
+		 * The EIM table is keyed by {internal_ip, internal_port, protocol}.
+		 * We check if an EIM entry already exists for this subscriber's
+		 * internal IP using the candidate external port as the internal port,
+		 * which would indicate a port collision.
+		 * Note: In a full implementation, you would maintain a separate
+		 * port bitmap per public IP for O(1) port availability checks.
+		 */
 		struct eim_key eim_check = {
-			.internal_ip = 0,
+			.internal_ip = internal_ip,
 			.internal_port = port,
-			.protocol = 0,
+			.protocol = protocol,
 		};
 		struct eim_mapping *existing = bpf_map_lookup_elem(&eim_table, &eim_check);
 		if (existing != NULL) {
-			/* Port already in use, try next */
+			/* Port already in use by this subscriber, try next */
 			port = __sync_fetch_and_add(&block->next_port, 1);
 			continue;
 		}
@@ -485,7 +491,7 @@ static __always_inline struct eim_mapping *get_eim_mapping(
 	struct nat_config *cfg = get_config();
 	__u8 preserve_parity = cfg && (cfg->flags & NAT_FLAG_PORT_PARITY);
 
-	__u16 ext_port = allocate_port_from_block(&sub_nat->block, preserve_parity, internal_port);
+	__u16 ext_port = allocate_port_from_block(&sub_nat->block, preserve_parity, internal_port, internal_ip, protocol);
 	if (ext_port == 0) {
 		if (stats) update_stat(&stats->port_exhaustion);
 		return NULL;
@@ -682,7 +688,7 @@ int nat44_egress(struct __sk_buff *skb) {
 		if (!eim) {
 			/* No EIM or EIM disabled - allocate new port */
 			__u8 preserve_parity = cfg && (cfg->flags & NAT_FLAG_PORT_PARITY);
-			__u16 alloc_port = allocate_port_from_block(&sub_nat->block, preserve_parity, bpf_ntohs(src_port));
+			__u16 alloc_port = allocate_port_from_block(&sub_nat->block, preserve_parity, bpf_ntohs(src_port), ip->saddr, ip->protocol);
 			if (alloc_port == 0) {
 				if (stats) update_stat(&stats->port_exhaustion);
 				if (stats) update_stat(&stats->packets_dropped);
