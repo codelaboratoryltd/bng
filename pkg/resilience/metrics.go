@@ -1,6 +1,7 @@
 package resilience
 
 import (
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -54,7 +55,8 @@ type Metrics struct {
 	manager *Manager
 
 	// Previous counter values for delta calculation
-	prevCounterValues map[prometheus.Counter]float64
+	prevCounterValues   map[prometheus.Counter]float64
+	prevCounterValuesMu sync.Mutex
 }
 
 // NewMetrics creates new resilience metrics.
@@ -474,6 +476,8 @@ func (m *Metrics) Collect() {
 // This allows us to compute the delta between the current stat value and what we've
 // already added to the Prometheus counter.
 func (m *Metrics) getCounterValue(c prometheus.Counter) float64 {
+	m.prevCounterValuesMu.Lock()
+	defer m.prevCounterValuesMu.Unlock()
 	if val, ok := m.prevCounterValues[c]; ok {
 		return val
 	}
@@ -482,6 +486,8 @@ func (m *Metrics) getCounterValue(c prometheus.Counter) float64 {
 
 // updateCounterValue updates the tracked previous value for a counter after adding a delta.
 func (m *Metrics) updateCounterValue(c prometheus.Counter, newValue float64) {
+	m.prevCounterValuesMu.Lock()
+	defer m.prevCounterValuesMu.Unlock()
 	m.prevCounterValues[c] = newValue
 }
 
