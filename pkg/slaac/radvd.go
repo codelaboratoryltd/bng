@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -264,8 +265,8 @@ func (s *Server) sendPeriodicRAs(ctx context.Context) {
 	// Send initial RA
 	s.sendRA(nil)
 
-	// Random interval between min and max
-	interval := s.minRAInterval
+	// Random interval between min and max per RFC 4861
+	interval := s.minRAInterval + time.Duration(rand.Float64()*float64(s.maxRAInterval-s.minRAInterval))
 
 	for atomic.LoadInt32(&s.running) == 1 {
 		select {
@@ -273,8 +274,8 @@ func (s *Server) sendPeriodicRAs(ctx context.Context) {
 			return
 		case <-time.After(interval):
 			s.sendRA(nil)
-			// Randomize next interval
-			interval = s.minRAInterval + time.Duration(float64(s.maxRAInterval-s.minRAInterval)*0.5)
+			// Randomize next interval per RFC 4861
+			interval = s.minRAInterval + time.Duration(rand.Float64()*float64(s.maxRAInterval-s.minRAInterval))
 		}
 	}
 }

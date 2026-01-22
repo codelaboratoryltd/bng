@@ -12,11 +12,13 @@ import (
 
 	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 	"github.com/codelaboratoryltd/bng/pkg/dhcp"
+	"github.com/codelaboratoryltd/bng/pkg/dhcpv6"
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
 	"github.com/codelaboratoryltd/bng/pkg/metrics"
 	"github.com/codelaboratoryltd/bng/pkg/nat"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
+	"github.com/codelaboratoryltd/bng/pkg/slaac"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 )
@@ -89,6 +91,28 @@ var (
 	authMTLSCA         string
 	authMTLSServerName string
 	authMTLSInsecure   bool
+
+	// DHCPv6 configuration
+	dhcpv6Enabled           bool
+	dhcpv6AddressPool       string
+	dhcpv6PrefixPool        string
+	dhcpv6DelegationLength  uint8
+	dhcpv6DNSServers        string
+	dhcpv6DomainSearch      string
+	dhcpv6PreferredLifetime uint32
+	dhcpv6ValidLifetime     uint32
+
+	// SLAAC/RA configuration
+	slaacEnabled     bool
+	slaacPrefixes    string
+	slaacManaged     bool // M flag - use DHCPv6 for addresses
+	slaacOther       bool // O flag - use DHCPv6 for other config (DNS, etc.)
+	slaacMTU         uint32
+	slaacDNSServers  string
+	slaacDNSDomains  string
+	slaacMinInterval time.Duration
+	slaacMaxInterval time.Duration
+	slaacLifetime    uint16
 )
 
 func init() {
@@ -162,6 +186,46 @@ func init() {
 		"Expected server hostname for mTLS verification")
 	runCmd.Flags().BoolVar(&authMTLSInsecure, "auth-mtls-insecure", false,
 		"Skip TLS server verification (INSECURE - testing only)")
+
+	// DHCPv6 flags (Issue #26)
+	runCmd.Flags().BoolVar(&dhcpv6Enabled, "dhcpv6-enabled", false,
+		"Enable DHCPv6 server for IPv6 address assignment")
+	runCmd.Flags().StringVar(&dhcpv6AddressPool, "dhcpv6-address-pool", "",
+		"DHCPv6 address pool (CIDR, e.g., '2001:db8:1::/64')")
+	runCmd.Flags().StringVar(&dhcpv6PrefixPool, "dhcpv6-prefix-pool", "",
+		"DHCPv6 prefix delegation pool (CIDR, e.g., '2001:db8:2::/48')")
+	runCmd.Flags().Uint8Var(&dhcpv6DelegationLength, "dhcpv6-delegation-length", 60,
+		"Prefix length to delegate to customers (e.g., 56, 60, 64)")
+	runCmd.Flags().StringVar(&dhcpv6DNSServers, "dhcpv6-dns", "",
+		"DHCPv6 DNS servers (comma-separated IPv6 addresses)")
+	runCmd.Flags().StringVar(&dhcpv6DomainSearch, "dhcpv6-domain-search", "",
+		"DHCPv6 domain search list (comma-separated)")
+	runCmd.Flags().Uint32Var(&dhcpv6PreferredLifetime, "dhcpv6-preferred-lifetime", 3600,
+		"DHCPv6 preferred lifetime in seconds")
+	runCmd.Flags().Uint32Var(&dhcpv6ValidLifetime, "dhcpv6-valid-lifetime", 7200,
+		"DHCPv6 valid lifetime in seconds")
+
+	// SLAAC/RA flags (Issue #27)
+	runCmd.Flags().BoolVar(&slaacEnabled, "slaac-enabled", false,
+		"Enable SLAAC Router Advertisement daemon")
+	runCmd.Flags().StringVar(&slaacPrefixes, "slaac-prefixes", "",
+		"Prefixes to advertise via SLAAC (comma-separated CIDR)")
+	runCmd.Flags().BoolVar(&slaacManaged, "slaac-managed", false,
+		"Set M flag - use DHCPv6 for addresses (disables SLAAC address generation)")
+	runCmd.Flags().BoolVar(&slaacOther, "slaac-other", false,
+		"Set O flag - use DHCPv6 for other config (DNS, etc.)")
+	runCmd.Flags().Uint32Var(&slaacMTU, "slaac-mtu", 0,
+		"MTU to advertise (0 = don't advertise)")
+	runCmd.Flags().StringVar(&slaacDNSServers, "slaac-dns", "",
+		"DNS servers to advertise via RDNSS (comma-separated IPv6 addresses)")
+	runCmd.Flags().StringVar(&slaacDNSDomains, "slaac-dns-domains", "",
+		"DNS search domains to advertise via DNSSL (comma-separated)")
+	runCmd.Flags().DurationVar(&slaacMinInterval, "slaac-min-interval", 200*time.Second,
+		"Minimum RA interval")
+	runCmd.Flags().DurationVar(&slaacMaxInterval, "slaac-max-interval", 600*time.Second,
+		"Maximum RA interval")
+	runCmd.Flags().Uint16Var(&slaacLifetime, "slaac-lifetime", 1800,
+		"Router lifetime in seconds (0 = not a default router)")
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)
@@ -393,6 +457,80 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Initialize DHCPv6 server if enabled (Issue #26)
+	var dhcpv6Server *dhcpv6.Server
+	if dhcpv6Enabled {
+		var v6DNSServers []string
+		if dhcpv6DNSServers != "" {
+			v6DNSServers = splitAndTrim(dhcpv6DNSServers)
+		}
+		var v6DomainSearch []string
+		if dhcpv6DomainSearch != "" {
+			v6DomainSearch = splitAndTrim(dhcpv6DomainSearch)
+		}
+
+		dhcpv6Server, err = dhcpv6.NewServer(dhcpv6.ServerConfig{
+			Interface:         iface,
+			AddressPool:       dhcpv6AddressPool,
+			PrefixPool:        dhcpv6PrefixPool,
+			DelegationLength:  dhcpv6DelegationLength,
+			DNSServers:        v6DNSServers,
+			DomainSearch:      v6DomainSearch,
+			PreferredLifetime: dhcpv6PreferredLifetime,
+			ValidLifetime:     dhcpv6ValidLifetime,
+		}, logger)
+		if err != nil {
+			logger.Warn("Failed to create DHCPv6 server", zap.Error(err))
+		} else {
+			logger.Info("DHCPv6 server configured",
+				zap.String("interface", iface),
+				zap.String("address_pool", dhcpv6AddressPool),
+				zap.String("prefix_pool", dhcpv6PrefixPool),
+				zap.Uint8("delegation_length", dhcpv6DelegationLength),
+			)
+		}
+	}
+
+	// Initialize SLAAC/RA daemon if enabled (Issue #27)
+	var raServer *slaac.Server
+	if slaacEnabled {
+		var raDNSServers []string
+		if slaacDNSServers != "" {
+			raDNSServers = splitAndTrim(slaacDNSServers)
+		}
+		var raDNSDomains []string
+		if slaacDNSDomains != "" {
+			raDNSDomains = splitAndTrim(slaacDNSDomains)
+		}
+		var raPrefixes []string
+		if slaacPrefixes != "" {
+			raPrefixes = splitAndTrim(slaacPrefixes)
+		}
+
+		raServer, err = slaac.NewServer(slaac.Config{
+			Interface:       iface,
+			Prefixes:        raPrefixes,
+			MTU:             slaacMTU,
+			Managed:         slaacManaged,
+			Other:           slaacOther,
+			DNSServers:      raDNSServers,
+			DNSDomains:      raDNSDomains,
+			DefaultLifetime: slaacLifetime,
+			MinRAInterval:   slaacMinInterval,
+			MaxRAInterval:   slaacMaxInterval,
+		}, logger)
+		if err != nil {
+			logger.Warn("Failed to create SLAAC/RA daemon", zap.Error(err))
+		} else {
+			logger.Info("SLAAC/RA daemon configured",
+				zap.String("interface", iface),
+				zap.Strings("prefixes", raPrefixes),
+				zap.Bool("managed", slaacManaged),
+				zap.Bool("other", slaacOther),
+			)
+		}
+	}
+
 	// Create and register metrics
 	metricsCollector := metrics.New(loader, poolMgr, dhcpServer, logger)
 	if err := metricsCollector.Register(); err != nil {
@@ -425,10 +563,35 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	// Start DHCPv6 server if enabled (Issue #26)
+	if dhcpv6Server != nil {
+		go func() {
+			if err := dhcpv6Server.Start(ctx); err != nil {
+				logger.Error("DHCPv6 server error", zap.Error(err))
+			}
+		}()
+		logger.Info("DHCPv6 server started",
+			zap.String("interface", iface),
+		)
+	}
+
+	// Start SLAAC/RA daemon if enabled (Issue #27)
+	if raServer != nil {
+		if err := raServer.Start(ctx); err != nil {
+			logger.Error("Failed to start SLAAC/RA daemon", zap.Error(err))
+		} else {
+			logger.Info("SLAAC/RA daemon started",
+				zap.String("interface", iface),
+			)
+		}
+	}
+
 	logger.Info("BNG started successfully",
 		zap.String("interface", iface),
 		zap.String("pool", poolNetwork),
 		zap.String("metrics", metricsAddr),
+		zap.Bool("dhcpv6_enabled", dhcpv6Server != nil),
+		zap.Bool("slaac_enabled", raServer != nil),
 	)
 	logger.Info("Press Ctrl+C to stop")
 
@@ -445,6 +608,18 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	}
 	if natLogger != nil {
 		natLogger.Stop()
+	}
+	// Stop DHCPv6 server (Issue #26)
+	if dhcpv6Server != nil {
+		if err := dhcpv6Server.Stop(); err != nil {
+			logger.Warn("Failed to stop DHCPv6 server", zap.Error(err))
+		}
+	}
+	// Stop SLAAC/RA daemon (Issue #27)
+	if raServer != nil {
+		if err := raServer.Stop(); err != nil {
+			logger.Warn("Failed to stop SLAAC/RA daemon", zap.Error(err))
+		}
 	}
 	logger.Info("BNG stopped")
 	return nil
