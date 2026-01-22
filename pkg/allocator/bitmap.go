@@ -514,3 +514,37 @@ func ipOffset(base, target net.IP) *big.Int {
 
 	return new(big.Int).Sub(targetInt, baseInt)
 }
+
+// SetAllocation forcibly sets an allocation (for replaying from distributed store).
+// This is used during startup to restore state from the authoritative store.
+func (a *IPAllocator) SetAllocation(subscriberID string, prefix *net.IPNet) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	idx, err := a.getIndexByPrefix(prefix)
+	if err != nil {
+		return fmt.Errorf("prefix %s out of range for pool: %w", prefix, err)
+	}
+
+	// Check if already allocated to someone else
+	if existing, exists := a.indexToSubscriber[idx]; exists && existing != subscriberID {
+		return fmt.Errorf("prefix %s already allocated to %s", prefix, existing)
+	}
+
+	// Clear any existing allocation for this subscriber
+	if oldIdx, exists := a.allocated[subscriberID]; exists {
+		if oldIdx != idx {
+			a.bitmap.SetBit(a.bitmap, int(oldIdx), 0)
+			delete(a.indexToSubscriber, oldIdx)
+			a.allocatedCount.Sub(a.allocatedCount, big.NewInt(1))
+		}
+	}
+
+	// Set new allocation
+	a.bitmap.SetBit(a.bitmap, int(idx), 1)
+	a.allocated[subscriberID] = idx
+	a.indexToSubscriber[idx] = subscriberID
+	a.allocatedCount.Add(a.allocatedCount, big.NewInt(1))
+
+	return nil
+}
