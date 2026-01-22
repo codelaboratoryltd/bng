@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 	"github.com/codelaboratoryltd/bng/pkg/dhcp"
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
 	"github.com/codelaboratoryltd/bng/pkg/metrics"
@@ -78,6 +79,16 @@ var (
 	natPortsPerSub int
 	natLogEnabled  bool
 	natLogPath     string
+
+	// Device authentication configuration
+	authMode           string
+	authPSK            string
+	authPSKFile        string
+	authMTLSCert       string
+	authMTLSKey        string
+	authMTLSCA         string
+	authMTLSServerName string
+	authMTLSInsecure   bool
 )
 
 func init() {
@@ -133,6 +144,24 @@ func init() {
 		"Enable NAT translation logging (required for legal compliance)")
 	runCmd.Flags().StringVar(&natLogPath, "nat-log-path", "",
 		"Path to NAT log file (empty for stdout)")
+
+	// Device authentication flags
+	runCmd.Flags().StringVar(&authMode, "auth-mode", "none",
+		"Device authentication mode: none, psk, mtls (default: none)")
+	runCmd.Flags().StringVar(&authPSK, "auth-psk", "",
+		"Pre-shared key for device authentication (use --auth-psk-file for production)")
+	runCmd.Flags().StringVar(&authPSKFile, "auth-psk-file", "",
+		"Path to file containing pre-shared key")
+	runCmd.Flags().StringVar(&authMTLSCert, "auth-mtls-cert", "",
+		"Path to device certificate (PEM format) for mTLS")
+	runCmd.Flags().StringVar(&authMTLSKey, "auth-mtls-key", "",
+		"Path to device private key (PEM format) for mTLS")
+	runCmd.Flags().StringVar(&authMTLSCA, "auth-mtls-ca", "",
+		"Path to CA certificate bundle (PEM format) for mTLS server verification")
+	runCmd.Flags().StringVar(&authMTLSServerName, "auth-mtls-server-name", "",
+		"Expected server hostname for mTLS verification")
+	runCmd.Flags().BoolVar(&authMTLSInsecure, "auth-mtls-insecure", false,
+		"Skip TLS server verification (INSECURE - testing only)")
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)
@@ -550,4 +579,37 @@ func parsePort(s string, defaultPort int) int {
 		return defaultPort
 	}
 	return port
+}
+
+// buildAuthConfig creates device authentication configuration from CLI flags.
+func buildAuthConfig() deviceauth.Config {
+	config := deviceauth.DefaultConfig()
+
+	switch authMode {
+	case "none", "":
+		config.Mode = deviceauth.AuthModeNone
+
+	case "psk":
+		config.Mode = deviceauth.AuthModePSK
+		config.PSK = &deviceauth.PSKConfig{
+			Key:     authPSK,
+			KeyFile: authPSKFile,
+		}
+
+	case "mtls":
+		config.Mode = deviceauth.AuthModeMTLS
+		config.MTLS = &deviceauth.MTLSConfig{
+			CertFile:           authMTLSCert,
+			KeyFile:            authMTLSKey,
+			CAFile:             authMTLSCA,
+			ServerName:         authMTLSServerName,
+			InsecureSkipVerify: authMTLSInsecure,
+		}
+
+	default:
+		// Treat unknown as none
+		config.Mode = deviceauth.AuthModeNone
+	}
+
+	return config
 }
