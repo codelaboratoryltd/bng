@@ -45,13 +45,18 @@ type IPPool struct {
 	_            uint32 // Padding
 }
 
-// DHCPStats represents DHCP performance counters (mirrors eBPF struct)
+// DHCPStats must match the layout of dhcp_stats in bpf/maps.h
 type DHCPStats struct {
-	TotalRequests  uint64
-	FastpathHits   uint64
-	FastpathMisses uint64
-	Errors         uint64
-	CacheExpired   uint64
+	TotalRequests    uint64
+	FastpathHits     uint64
+	FastpathMisses   uint64
+	Errors           uint64
+	CacheExpired     uint64
+	Option82Present  uint64 // Issue #15: packets with Option 82
+	Option82Absent   uint64 // Issue #15: packets without Option 82
+	BroadcastReplies uint64 // Issue #17: broadcast L2 replies
+	UnicastReplies   uint64 // Issue #17: unicast L2 replies
+	VLANPackets      uint64 // Issue #17: VLAN-tagged packets
 }
 
 // ServerConfig represents DHCP server configuration for eBPF (mirrors eBPF struct)
@@ -77,6 +82,7 @@ type Loader struct {
 	ipPools             *ebpf.Map
 	statsMap            *ebpf.Map
 	serverConfigMap     *ebpf.Map
+	circuitIDMap        *ebpf.Map // Issue #15: Circuit-ID to MAC mapping
 }
 
 // LoaderOption configures the Loader
@@ -189,6 +195,16 @@ func (l *Loader) Load(ctx context.Context) error {
 	l.serverConfigMap = coll.Maps["server_config"]
 	if l.serverConfigMap == nil {
 		return fmt.Errorf("server_config map not found")
+	}
+
+	// Issue #15: Circuit-ID map (optional - may not be present in older programs)
+	// circuit_id_map uses FNV-1a hash as key. While FNV-1a has good distribution,
+	// hash collisions are possible with very large subscriber counts (1M+).
+	// For production deployments at scale, consider monitoring collision metrics
+	// or implementing collision detection in the value struct.
+	l.circuitIDMap = coll.Maps["circuit_id_map"]
+	if l.circuitIDMap == nil {
+		l.logger.Warn("circuit_id_map not found - Option 82 circuit-id lookup disabled")
 	}
 
 	// Initialize stats map with zeroed entry
@@ -430,6 +446,60 @@ func (l *Loader) GetServerConfig() (*ServerConfig, error) {
 	}
 
 	return &config, nil
+}
+
+// === Circuit-ID Map Operations (Issue #15) ===
+
+// FNV-1a hash constants (must match eBPF implementation)
+const (
+	fnv1aInit  uint64 = 0xcbf29ce484222325
+	fnv1aPrime uint64 = 0x100000001b3
+)
+
+// HashCircuitID computes FNV-1a hash of a circuit-id string
+// This must match the hash function in the eBPF program
+func HashCircuitID(circuitID []byte) uint64 {
+	hash := fnv1aInit
+	for _, b := range circuitID {
+		hash ^= uint64(b)
+		hash *= fnv1aPrime
+	}
+	return hash
+}
+
+// AddCircuitIDMapping adds a circuit-id to MAC address mapping
+// This allows the eBPF fast path to look up subscribers by Option 82 circuit-id
+func (l *Loader) AddCircuitIDMapping(circuitID []byte, mac uint64) error {
+	if l.circuitIDMap == nil {
+		return fmt.Errorf("circuit_id_map not loaded")
+	}
+
+	hash := HashCircuitID(circuitID)
+	return l.circuitIDMap.Put(&hash, &mac)
+}
+
+// RemoveCircuitIDMapping removes a circuit-id mapping
+func (l *Loader) RemoveCircuitIDMapping(circuitID []byte) error {
+	if l.circuitIDMap == nil {
+		return fmt.Errorf("circuit_id_map not loaded")
+	}
+
+	hash := HashCircuitID(circuitID)
+	return l.circuitIDMap.Delete(&hash)
+}
+
+// GetCircuitIDMapping looks up the MAC address for a circuit-id
+func (l *Loader) GetCircuitIDMapping(circuitID []byte) (uint64, error) {
+	if l.circuitIDMap == nil {
+		return 0, fmt.Errorf("circuit_id_map not loaded")
+	}
+
+	hash := HashCircuitID(circuitID)
+	var mac uint64
+	if err := l.circuitIDMap.Lookup(&hash, &mac); err != nil {
+		return 0, err
+	}
+	return mac, nil
 }
 
 // === Helper Functions ===

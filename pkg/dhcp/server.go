@@ -75,6 +75,16 @@ type Lease struct {
 	// QinQ VLAN context (for European PoI deployments)
 	STag uint16 // Service VLAN (outer, 802.1ad)
 	CTag uint16 // Customer VLAN (inner, 802.1Q)
+
+	// Issue #15: Option 82 information
+	CircuitID []byte // Option 82 Circuit-ID
+	RemoteID  []byte // Option 82 Remote-ID
+}
+
+// RelayAgentInfo contains parsed Option 82 data (Issue #15)
+type RelayAgentInfo struct {
+	CircuitID []byte // Sub-option 1: identifies physical port/VLAN
+	RemoteID  []byte // Sub-option 2: identifies relay agent
 }
 
 // ServerConfig configures the DHCP server
@@ -135,6 +145,47 @@ func generateSessionID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// parseOption82 extracts Relay Agent Information from DHCP packet (Issue #15)
+// Returns nil if Option 82 is not present
+func parseOption82(req *dhcpv4.DHCPv4) *RelayAgentInfo {
+	opt82 := req.Options.Get(dhcpv4.OptionRelayAgentInformation)
+	if opt82 == nil || len(opt82) == 0 {
+		return nil
+	}
+
+	info := &RelayAgentInfo{}
+	offset := 0
+
+	// Parse TLV sub-options within Option 82
+	for offset < len(opt82) {
+		if offset+2 > len(opt82) {
+			break
+		}
+
+		subOptType := opt82[offset]
+		subOptLen := int(opt82[offset+1])
+		offset += 2
+
+		if offset+subOptLen > len(opt82) {
+			break
+		}
+
+		subOptData := opt82[offset : offset+subOptLen]
+		offset += subOptLen
+
+		switch subOptType {
+		case 1: // Circuit-ID
+			info.CircuitID = make([]byte, len(subOptData))
+			copy(info.CircuitID, subOptData)
+		case 2: // Remote-ID
+			info.RemoteID = make([]byte, len(subOptData))
+			copy(info.RemoteID, subOptData)
+		}
+	}
+
+	return info
 }
 
 // Start starts the DHCP server
@@ -205,11 +256,23 @@ func (s *Server) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCP
 	mac := req.ClientHWAddr.String()
 	msgType := req.MessageType()
 
-	s.logger.Debug("DHCP request received (slow path)",
-		zap.String("mac", mac),
-		zap.String("type", msgType.String()),
-		zap.String("xid", fmt.Sprintf("%08x", req.TransactionID)),
-	)
+	// Parse Option 82 if present (Issue #15)
+	opt82 := parseOption82(req)
+	if opt82 != nil {
+		s.logger.Debug("DHCP request with Option 82 (slow path)",
+			zap.String("mac", mac),
+			zap.String("type", msgType.String()),
+			zap.String("xid", fmt.Sprintf("%08x", req.TransactionID)),
+			zap.String("circuit_id", string(opt82.CircuitID)),
+			zap.String("remote_id", string(opt82.RemoteID)),
+		)
+	} else {
+		s.logger.Debug("DHCP request received (slow path)",
+			zap.String("mac", mac),
+			zap.String("type", msgType.String()),
+			zap.String("xid", fmt.Sprintf("%08x", req.TransactionID)),
+		)
+	}
 
 	var resp *dhcpv4.DHCPv4
 	var err error
@@ -451,6 +514,13 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		Hostname:  string(req.Options.Get(dhcpv4.OptionHostName)),
 	}
 
+	// Parse Option 82 for this request (Issue #15)
+	opt82 := parseOption82(req)
+	if opt82 != nil {
+		lease.CircuitID = opt82.CircuitID
+		lease.RemoteID = opt82.RemoteID
+	}
+
 	// For new sessions, set session tracking fields
 	if isNewSession {
 		lease.SessionID = generateSessionID()
@@ -467,6 +537,11 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		lease.PolicyName = existingLease.PolicyName
 		lease.InputBytes = existingLease.InputBytes
 		lease.OutputBytes = existingLease.OutputBytes
+		// Preserve Option 82 if not present in current request
+		if lease.CircuitID == nil && existingLease.CircuitID != nil {
+			lease.CircuitID = existingLease.CircuitID
+			lease.RemoteID = existingLease.RemoteID
+		}
 	}
 
 	s.leasesMu.Lock()
@@ -479,6 +554,23 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 			zap.String("mac", mac.String()),
 			zap.Error(err),
 		)
+	}
+
+	// Issue #15: Add circuit-id mapping for fast path lookup
+	if lease.CircuitID != nil && len(lease.CircuitID) > 0 && s.loader != nil {
+		macU64 := ebpf.MACToUint64(mac)
+		if err := s.loader.AddCircuitIDMapping(lease.CircuitID, macU64); err != nil {
+			s.logger.Warn("Failed to add circuit-id mapping to eBPF",
+				zap.String("mac", mac.String()),
+				zap.String("circuit_id", string(lease.CircuitID)),
+				zap.Error(err),
+			)
+		} else {
+			s.logger.Debug("Added circuit-id mapping for fast path",
+				zap.String("mac", mac.String()),
+				zap.String("circuit_id", string(lease.CircuitID)),
+			)
+		}
 	}
 
 	// Apply QoS policy for new sessions
@@ -648,6 +740,17 @@ func (s *Server) handleRelease(req *dhcpv4.DHCPv4) {
 				s.logger.Warn("Failed to remove from VLAN fast path cache",
 					zap.Uint16("s_tag", lease.STag),
 					zap.Uint16("c_tag", lease.CTag),
+					zap.Error(err),
+				)
+			}
+		}
+
+		// Issue #15: Remove circuit-id mapping if present
+		if lease.CircuitID != nil && len(lease.CircuitID) > 0 {
+			if err := s.loader.RemoveCircuitIDMapping(lease.CircuitID); err != nil {
+				s.logger.Warn("Failed to remove circuit-id mapping",
+					zap.String("mac", mac.String()),
+					zap.String("circuit_id", string(lease.CircuitID)),
 					zap.Error(err),
 				)
 			}

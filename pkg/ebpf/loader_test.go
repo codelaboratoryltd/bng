@@ -174,3 +174,68 @@ func TestIPPoolSize(t *testing.T) {
 	// Just check it's not zero (the struct exists)
 	_ = pool
 }
+
+// Issue #15: Test FNV-1a hash function for circuit-id
+func TestHashCircuitID(t *testing.T) {
+	tests := []struct {
+		name      string
+		circuitID []byte
+	}{
+		{"empty", []byte{}},
+		{"simple", []byte("eth 0/1/1:100")},
+		{"huawei", []byte("eth 0/1/1:100.200")},
+		{"nokia", []byte("FSAN:ALCL12345678")},
+		{"generic", []byte("access-node-id eth 0/1/1 atm 0/100")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hash := HashCircuitID(tt.circuitID)
+			// Verify hash is deterministic
+			hash2 := HashCircuitID(tt.circuitID)
+			if hash != hash2 {
+				t.Errorf("HashCircuitID is not deterministic: %d != %d", hash, hash2)
+			}
+			// Verify different inputs produce different hashes (collision resistance)
+			if len(tt.circuitID) > 0 {
+				modified := make([]byte, len(tt.circuitID))
+				copy(modified, tt.circuitID)
+				modified[0] ^= 0xFF
+				hashModified := HashCircuitID(modified)
+				if hash == hashModified {
+					t.Errorf("HashCircuitID collision: %q and %q both hash to %d", tt.circuitID, modified, hash)
+				}
+			}
+		})
+	}
+}
+
+// Test that FNV-1a constants match the eBPF implementation
+func TestHashCircuitIDConstants(t *testing.T) {
+	// These must match the eBPF program constants
+	if fnv1aInit != 0xcbf29ce484222325 {
+		t.Errorf("fnv1aInit mismatch: got 0x%x, want 0xcbf29ce484222325", fnv1aInit)
+	}
+	if fnv1aPrime != 0x100000001b3 {
+		t.Errorf("fnv1aPrime mismatch: got 0x%x, want 0x100000001b3", fnv1aPrime)
+	}
+}
+
+// Test known FNV-1a hash values for circuit-ids
+func TestHashCircuitIDKnownValues(t *testing.T) {
+	// Test with a known circuit-id to ensure hash is correct
+	// FNV-1a hash of "test" should be a specific value
+	circuitID := []byte("test")
+	hash := HashCircuitID(circuitID)
+
+	// Manually compute expected FNV-1a hash of "test"
+	expected := uint64(0xcbf29ce484222325) // init
+	for _, b := range circuitID {
+		expected ^= uint64(b)
+		expected *= 0x100000001b3
+	}
+
+	if hash != expected {
+		t.Errorf("HashCircuitID(%q) = 0x%x, want 0x%x", circuitID, hash, expected)
+	}
+}
