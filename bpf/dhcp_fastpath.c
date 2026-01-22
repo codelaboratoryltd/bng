@@ -168,31 +168,6 @@ static __always_inline void update_stat(enum stat_counter counter) {
 }
 
 /* ========================================================================
- * FNV-1a Hash for Circuit-ID (Issue #15)
- * ======================================================================== */
-
-#define FNV1A_64_INIT  0xcbf29ce484222325ULL
-#define FNV1A_64_PRIME 0x100000001b3ULL
-
-/* Compute FNV-1a hash of buffer - verifier-safe bounded version */
-static __always_inline __u64 fnv1a_hash(__u8 *data, __u8 len, void *data_end) {
-	__u64 hash = FNV1A_64_INIT;
-
-	/* Bound the loop for eBPF verifier */
-	#pragma unroll
-	for (int i = 0; i < MAX_CIRCUIT_ID_LEN; i++) {
-		if (i >= len)
-			break;
-		if ((void *)(data + i + 1) > data_end)
-			break;
-		hash ^= data[i];
-		hash *= FNV1A_64_PRIME;
-	}
-
-	return hash;
-}
-
-/* ========================================================================
  * MAC Address Utilities
  * ======================================================================== */
 
@@ -225,121 +200,62 @@ static __always_inline int is_zero_mac(__u8 *mac) {
 }
 
 /* ========================================================================
- * Issue #14: Variable-Length DHCP Option Parsing
+ * Simple DHCP Option Parsing - Extract Message Type Only
  *
- * Implements safe, bounded option parsing that satisfies the eBPF verifier.
- * Supports:
- * - Option 53 (Message Type)
- * - Option 50 (Requested IP)
- * - Option 61 (Client Identifier)
- * - Option 82 (Relay Agent Information) with sub-options
- * - Proper handling of PAD (0) and END (255) options
+ * Simplified version for BPF verifier compatibility.
+ * Only extracts Option 53 (Message Type) which is typically at offset 0-4
+ * in the options area for standard DHCP packets.
  * ======================================================================== */
 
-/* Parse all DHCP options from packet
- * Returns 0 on success, -1 on error
+/* Extract DHCP message type from options
+ * Returns the message type (1-8) or 0 if not found
  *
- * Note: We pass dhcp_base (start of DHCP packet) and compute offsets from there
- * rather than using dhcp->options directly. This helps the BPF verifier track
- * bounds correctly since flexible array members confuse the verifier.
+ * DHCP options layout: Option 53 (msg type) is typically first or second option
+ * Format: [code][len][data] where code=53, len=1, data=msg_type
  */
-static __always_inline int parse_dhcp_options(void *dhcp_base,
-                                               void *data_end,
-                                               struct dhcp_parsed_options *opts) {
-	/* Initialize output structure */
-	opts->msg_type = 0;
-	opts->has_option82 = 0;
-	opts->circuit_id_len = 0;
-	opts->remote_id_len = 0;
-	opts->requested_ip = 0;
-	opts->client_id_len = 0;
-
+static __always_inline __u8 get_dhcp_msg_type(void *dhcp_base, void *data_end) {
 	/* DHCP options start at offset 240 (after fixed header + magic cookie) */
-	#define DHCP_OPTIONS_OFFSET 240
+	__u8 *opts = (__u8 *)dhcp_base + 240;
 
-	/*
-	 * Bounded loop for eBPF verifier (Issue #14)
-	 * We iterate up to MAX_DHCP_OPTIONS_ITER times, which is sufficient
-	 * for real-world DHCP packets. The offset check ensures we don't
-	 * read beyond the options area.
-	 */
+	/* Check we have room for at least a few options (16 bytes) */
+	if ((void *)(opts + 16) > data_end)
+		return 0;
+
+	/* Option 53 is typically in the first few bytes of options
+	 * Scan the first 16 bytes looking for it */
 	#pragma unroll
-	for (int i = 0; i < MAX_DHCP_OPTIONS_ITER; i++) {
-		/* Compute current position - always from dhcp_base for verifier */
-		__u32 pos = DHCP_OPTIONS_OFFSET + i * 2;  /* Conservative estimate */
+	for (int i = 0; i < 16; i++) {
+		/* Bounds check */
+		if ((void *)(opts + i + 3) > data_end)
+			return 0;
 
-		/* Stop if we've exceeded maximum scan length */
-		if (pos >= DHCP_OPTIONS_OFFSET + MAX_DHCP_OPTIONS_SCAN_LEN)
-			break;
+		__u8 code = opts[i];
 
-		/* Compute pointer and do explicit bounds check */
-		__u8 *opt_ptr = (__u8 *)dhcp_base + pos;
+		/* End marker */
+		if (code == 255)
+			return 0;
 
-		/* Bounds check - verifier needs this before any access */
-		if ((void *)(opt_ptr + 1) > data_end)
-			break;
-
-		__u8 opt_code = *opt_ptr;
-
-		/* Check for END option */
-		if (opt_code == DHCP_OPT_END)
-			break;
-
-		/* Handle PAD option (single byte, no length field) */
-		if (opt_code == DHCP_OPT_PAD) {
+		/* Skip PAD bytes */
+		if (code == 0)
 			continue;
+
+		/* Get option length */
+		__u8 len = opts[i + 1];
+
+		/* Option 53 (Message Type) has length 1 */
+		if (code == 53 && len == 1) {
+			return opts[i + 2];
 		}
 
-		/* Bounds check for option length byte */
-		if ((void *)(opt_ptr + 2) > data_end)
-			break;
+		/* Skip to next option: code + len + data */
+		i += 1 + len;  /* Loop will add 1 more */
 
-		__u8 opt_len = *(opt_ptr + 1);
-
-		/* Sanity check: option length shouldn't exceed reasonable bounds */
-		if (opt_len > 64)
-			break;
-
-		/* Bounds check for option data */
-		if ((void *)(opt_ptr + 2 + opt_len) > data_end)
-			break;
-
-		/* Process specific options */
-		switch (opt_code) {
-		case DHCP_OPT_MSG_TYPE:
-			/* Option 53: DHCP Message Type (1 byte) */
-			if (opt_len >= 1) {
-				__u8 *msg_ptr = opt_ptr + 2;
-				if ((void *)(msg_ptr + 1) <= data_end)
-					opts->msg_type = *msg_ptr;
-			}
-			break;
-
-		case DHCP_OPT_REQUESTED_IP:
-			/* Option 50: Requested IP Address (4 bytes) */
-			if (opt_len >= 4) {
-				__u8 *ip_ptr = opt_ptr + 2;
-				if ((void *)(ip_ptr + 4) <= data_end)
-					opts->requested_ip = *(__u32 *)ip_ptr;
-			}
-			break;
-
-		case DHCP_OPT_CLIENT_ID:
-			/* Option 61: Client Identifier (variable) - just note presence */
-			opts->client_id_len = (opt_len > 64) ? 64 : opt_len;
-			break;
-
-		case DHCP_OPT_RELAY_AGENT_INFO:
-			/* Option 82: Relay Agent Information (Issue #15) */
-			opts->has_option82 = 1;
-			/* Skip detailed parsing for now - just detect presence */
-			break;
-		}
+		/* Safety check */
+		if (i >= 14)
+			return 0;
 	}
 
 	return 0;
-
-	#undef DHCP_OPTIONS_OFFSET
 }
 
 /* ========================================================================
@@ -622,38 +538,14 @@ static __always_inline int build_dhcp_options(__u8 *opt, void *data_end,
 }
 
 /* ========================================================================
- * Subscriber Lookup (Issue #15: Circuit-ID Support)
+ * Subscriber Lookup
  * ======================================================================== */
 
-/* Look up subscriber - tries circuit-id first if present, then MAC */
+/* Look up subscriber by MAC address */
 static __always_inline struct pool_assignment *lookup_subscriber(
-		struct dhcp_packet *dhcp,
-		struct dhcp_parsed_options *opts,
-		void *data_end) {
-
-	struct pool_assignment *assignment = NULL;
-
-	/* If Option 82 present with circuit-id, try that first (Issue #15) */
-	if (opts->has_option82 && opts->circuit_id_len > 0) {
-		/* Hash the circuit-id for lookup */
-		__u64 circuit_hash = fnv1a_hash(opts->circuit_id, opts->circuit_id_len, data_end);
-
-		/* Look up MAC address associated with this circuit-id */
-		__u64 *mac_ptr = bpf_map_lookup_elem(&circuit_id_map, &circuit_hash);
-		if (mac_ptr) {
-			/* Found circuit-id mapping, lookup subscriber by that MAC */
-			assignment = bpf_map_lookup_elem(&subscriber_pools, mac_ptr);
-			if (assignment)
-				return assignment;
-		}
-		/* Circuit-id not found in map, fall through to MAC lookup */
-	}
-
-	/* Fall back to MAC-based lookup */
+		struct dhcp_packet *dhcp) {
 	__u64 mac_addr = mac_to_u64(dhcp->chaddr);
-	assignment = bpf_map_lookup_elem(&subscriber_pools, &mac_addr);
-
-	return assignment;
+	return bpf_map_lookup_elem(&subscriber_pools, &mac_addr);
 }
 
 /* ========================================================================
@@ -679,31 +571,19 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	/* Update total request counter */
 	update_stat(STAT_TOTAL_REQUESTS);
 
-	/* Parse DHCP options (Issue #14: variable-length support) */
-	struct dhcp_parsed_options opts = {};
-	if (parse_dhcp_options((void *)pkt.dhcp, pkt.data_end, &opts) < 0) {
-		update_stat(STAT_ERROR);
-		return XDP_PASS;
-	}
+	/* Extract DHCP message type - simplified parsing for verifier */
+	__u8 msg_type = get_dhcp_msg_type((void *)pkt.dhcp, pkt.data_end);
 
 	/* Only handle DISCOVER and REQUEST on fast path */
-	if (opts.msg_type != DHCP_DISCOVER && opts.msg_type != DHCP_REQUEST) {
+	if (msg_type != DHCP_DISCOVER && msg_type != DHCP_REQUEST) {
 		update_stat(STAT_FASTPATH_MISS);
 		return XDP_PASS;
-	}
-
-	/* Update Option 82 statistics (Issue #15) */
-	if (opts.has_option82) {
-		update_stat(STAT_OPTION82_PRESENT);
-	} else {
-		update_stat(STAT_OPTION82_ABSENT);
 	}
 
 	/* Lookup subscriber in cache
 	 * Strategy:
 	 * 1. If packet has VLAN tags, try VLAN-based lookup first (QinQ mode)
-	 * 2. Try circuit-id lookup if Option 82 present (Issue #15)
-	 * 3. Fall back to MAC-based lookup
+	 * 2. Fall back to MAC-based lookup
 	 */
 	struct pool_assignment *assignment = NULL;
 
@@ -716,9 +596,9 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 		assignment = bpf_map_lookup_elem(&vlan_subscriber_pools, &vkey);
 	}
 
-	/* If no VLAN match, try circuit-id or MAC lookup */
+	/* If no VLAN match, try MAC lookup */
 	if (!assignment) {
-		assignment = lookup_subscriber(pkt.dhcp, &opts, pkt.data_end);
+		assignment = lookup_subscriber(pkt.dhcp);
 	}
 
 	if (!assignment) {
@@ -754,7 +634,7 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	}
 
 	/* Determine reply type */
-	__u8 reply_type = (opts.msg_type == DHCP_DISCOVER) ? DHCP_OFFER : DHCP_ACK;
+	__u8 reply_type = (msg_type == DHCP_DISCOVER) ? DHCP_OFFER : DHCP_ACK;
 
 	/* === Build DHCP Reply === */
 
