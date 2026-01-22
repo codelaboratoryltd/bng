@@ -2,12 +2,25 @@ package routing_test
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/codelaboratoryltd/bng/pkg/routing"
 	"go.uber.org/zap"
 )
+
+// isPermissionError checks if an error is due to missing network permissions (CAP_NET_ADMIN)
+func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "operation not permitted") ||
+		strings.Contains(errStr, "permission denied") ||
+		strings.Contains(errStr, "EPERM") ||
+		strings.Contains(errStr, "not permitted")
+}
 
 func TestLinkState_String(t *testing.T) {
 	tests := []struct {
@@ -153,6 +166,10 @@ func TestManager_AddRoute(t *testing.T) {
 
 	err := manager.AddRoute(route)
 	if err != nil {
+		// Skip if we don't have permissions (CI environment)
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
 		t.Fatalf("AddRoute failed: %v", err)
 	}
 
@@ -195,10 +212,16 @@ func TestManager_DeleteRoute(t *testing.T) {
 		Interface:   "eth0",
 	}
 
-	manager.AddRoute(route)
+	err := manager.AddRoute(route)
+	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
+		t.Fatalf("AddRoute failed: %v", err)
+	}
 
 	// Delete route
-	err := manager.DeleteRoute(route)
+	err = manager.DeleteRoute(route)
 	if err != nil {
 		t.Fatalf("DeleteRoute failed: %v", err)
 	}
@@ -229,6 +252,9 @@ func TestManager_SetDefaultGateway(t *testing.T) {
 	gateway := net.ParseIP("192.168.1.1")
 	err := manager.SetDefaultGateway(gateway, "eth0")
 	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
 		t.Fatalf("SetDefaultGateway failed: %v", err)
 	}
 
@@ -268,6 +294,9 @@ func TestManager_SetDefaultGatewayECMP(t *testing.T) {
 
 	err := manager.SetDefaultGatewayECMP(nexthops)
 	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
 		t.Fatalf("SetDefaultGatewayECMP failed: %v", err)
 	}
 }
@@ -318,6 +347,9 @@ func TestManager_AddPolicyRule(t *testing.T) {
 
 	err := manager.AddPolicyRule(rule)
 	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
 		t.Fatalf("AddPolicyRule failed: %v", err)
 	}
 
@@ -371,10 +403,16 @@ func TestManager_DeletePolicyRule(t *testing.T) {
 		Description: "test rule",
 	}
 
-	manager.AddPolicyRule(rule)
+	err := manager.AddPolicyRule(rule)
+	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
+		t.Fatalf("AddPolicyRule failed: %v", err)
+	}
 
 	// Delete rule
-	err := manager.DeletePolicyRule(rule)
+	err = manager.DeletePolicyRule(rule)
 	if err != nil {
 		t.Fatalf("DeletePolicyRule failed: %v", err)
 	}
@@ -402,6 +440,9 @@ func TestManager_CreateISPTable(t *testing.T) {
 
 	err := manager.CreateISPTable("ISP-A", 100, net.ParseIP("192.168.1.1"), "eth0")
 	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
 		t.Fatalf("CreateISPTable failed: %v", err)
 	}
 
@@ -440,11 +481,17 @@ func TestManager_RouteSubscriberToISP(t *testing.T) {
 	defer manager.Stop()
 
 	// Create ISP table first
-	manager.CreateISPTable("ISP-A", 100, net.ParseIP("192.168.1.1"), "eth0")
+	err := manager.CreateISPTable("ISP-A", 100, net.ParseIP("192.168.1.1"), "eth0")
+	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
+		t.Fatalf("CreateISPTable failed: %v", err)
+	}
 
 	// Route subscriber to ISP
 	subscriberIP := net.ParseIP("10.0.0.50")
-	err := manager.RouteSubscriberToISP(subscriberIP, 100)
+	err = manager.RouteSubscriberToISP(subscriberIP, 100)
 	if err != nil {
 		t.Fatalf("RouteSubscriberToISP failed: %v", err)
 	}
@@ -492,15 +539,24 @@ func TestManager_Stats(t *testing.T) {
 	})
 
 	_, dest, _ := net.ParseCIDR("10.0.0.0/8")
-	manager.AddRoute(&routing.Route{
+	err := manager.AddRoute(&routing.Route{
 		Destination: dest,
 		Gateway:     net.ParseIP("192.168.1.1"),
 	})
+	if err != nil {
+		if isPermissionError(err) {
+			t.Skipf("Skipping test: requires CAP_NET_ADMIN (%v)", err)
+		}
+		t.Fatalf("AddRoute failed: %v", err)
+	}
 
-	manager.AddPolicyRule(&routing.PolicyRule{
+	err = manager.AddPolicyRule(&routing.PolicyRule{
 		Priority: 100,
 		Table:    100,
 	})
+	if err != nil {
+		t.Fatalf("AddPolicyRule failed: %v", err)
+	}
 
 	stats := manager.Stats()
 	if stats.UpstreamsTotal != 1 {
