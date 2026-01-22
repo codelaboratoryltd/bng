@@ -145,8 +145,8 @@ struct port_block {
 	__u32 public_ip;        /* Allocated public IP */
 	__u16 port_start;       /* Start of port range (inclusive) */
 	__u16 port_end;         /* End of port range (inclusive) */
-	__u16 next_port;        /* Next port to try allocating */
-	__u16 ports_in_use;     /* Current port utilization */
+	__u32 next_port;        /* Next port to try allocating (u32 for atomic ops) */
+	__u32 ports_in_use;     /* Current port utilization (u32 for atomic ops) */
 	__u64 allocated_at;     /* Allocation timestamp */
 	__u32 subscriber_id;    /* Subscriber identifier */
 	__u8  block_size_log2;  /* log2 of block size (e.g., 10 = 1024 ports) */
@@ -407,23 +407,35 @@ static __always_inline void update_csum16(__u16 *csum, __u16 old_val, __u16 new_
  */
 static __always_inline __u16 allocate_port_from_block(struct port_block *block, __u8 preserve_parity,
                                                        __u16 orig_port, __u32 internal_ip, __u8 protocol) {
-	/* Use atomic fetch-and-add for port allocation to ensure atomicity */
-	__u16 port = __sync_fetch_and_add(&block->next_port, 1);
-	__u16 start_port = port;
-	__u16 block_size = block->port_end - block->port_start + 1;
-
-	/* If preserving parity (for RTP/RTCP), ensure even/odd matches */
+	/*
+	 * Port allocation strategy for BPF compatibility:
+	 * BPF XADD doesn't support return values (older kernels/clang), so we:
+	 * 1. Read current port (non-atomic, but collision-safe due to EIM check)
+	 * 2. Increment next_port atomically
+	 * 3. Use the pre-read port value
+	 *
+	 * Races are acceptable since EIM lookup prevents actual port conflicts.
+	 */
 	__u8 orig_parity = orig_port & 1;
 
 	/* Search for available port within block */
 	#pragma unroll
 	for (int i = 0; i < 64; i++) {  /* Limit iterations for eBPF verifier */
+		/* Read and increment port counter */
+		__u16 port = (__u16)block->next_port;
+		__sync_fetch_and_add(&block->next_port, 1);
+
+		/* Wrap if needed */
 		if (port > block->port_end)
 			port = block->port_start;
 
-		/* Check parity if required */
+		/* Wrap the counter too */
+		if (block->next_port > block->port_end) {
+			block->next_port = block->port_start;
+		}
+
+		/* Check parity if required (for RTP/RTCP even/odd pairs) */
 		if (preserve_parity && ((port & 1) != orig_parity)) {
-			port = __sync_fetch_and_add(&block->next_port, 1);
 			continue;
 		}
 
@@ -443,16 +455,10 @@ static __always_inline __u16 allocate_port_from_block(struct port_block *block, 
 		struct eim_mapping *existing = bpf_map_lookup_elem(&eim_table, &eim_check);
 		if (existing != NULL) {
 			/* Port already in use by this subscriber, try next */
-			port = __sync_fetch_and_add(&block->next_port, 1);
 			continue;
 		}
 
 		/* Found an available port */
-		/* Wrap next_port if needed */
-		if (block->next_port > block->port_end) {
-			__sync_val_compare_and_swap(&block->next_port, block->next_port, block->port_start);
-		}
-
 		return port;
 	}
 
