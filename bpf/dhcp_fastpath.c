@@ -803,6 +803,13 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	__u16 l2_len = sizeof(struct ethhdr) + pkt.vlan_offset;
 	__u16 total_len = l2_len + ip_len;
 
+	/* Update lengths in headers BEFORE adjust_tail (pointers invalid after) */
+	pkt.ip->tot_len = bpf_htons(ip_len);
+	pkt.udp->len = bpf_htons(udp_len);
+
+	/* Calculate IP checksum BEFORE adjust_tail */
+	pkt.ip->check = ip_checksum(pkt.ip);
+
 	/* Calculate original packet size */
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
@@ -815,18 +822,11 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 			update_stat(STAT_ERROR);
 			return XDP_PASS;
 		}
-		/* Note: After adjust_tail, we should re-validate pointers.
-		 * However, since we're returning immediately after XDP_TX,
-		 * and we've already built the reply content, this is safe.
+		/* Note: After adjust_tail, packet pointers are invalidated.
+		 * We've already written all header fields, so we can proceed
+		 * directly to XDP_TX.
 		 */
 	}
-
-	/* Update lengths in headers */
-	pkt.ip->tot_len = bpf_htons(ip_len);
-	pkt.udp->len = bpf_htons(udp_len);
-
-	/* Calculate IP checksum */
-	pkt.ip->check = ip_checksum(pkt.ip);
 
 	/* Transmit reply back on same interface */
 	return XDP_TX;
