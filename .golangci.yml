@@ -1,0 +1,61 @@
+# golangci-lint configuration for BNG
+# https://golangci-lint.run/usage/configuration/
+run:
+  timeout: 5m
+  tests: true
+  build-tags:
+    - linux
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - unconvert
+    - bodyclose
+    - noctx
+    - gosec
+    - prealloc
+  disable:
+    - depguard  # We manage deps via go.mod
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+  govet:
+    enable:
+      - shadow
+  gosec:
+    severity: medium
+    confidence: medium
+    excludes:
+      - G104  # Audit errors not checked (handled by errcheck)
+  gofmt:
+    simplify: true
+  misspell:
+    locale: US
+
+issues:
+  exclude-rules:
+    # Exclude some linters from running on tests files
+    - path: _test\.go
+      linters:
+        - gosec
+        - noctx
+    # Exclude eBPF-related stub files
+    - path: _stub\.go
+      linters:
+        - unused
+    # Exclude linux-specific files on non-linux builds
+    - path: _linux\.go
+      linters:
+        - unused
+  max-issues-per-linter: 50
+  max-same-issues: 10
