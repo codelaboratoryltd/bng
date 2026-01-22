@@ -71,6 +71,10 @@ type Lease struct {
 	PolicyName   string    // QoS policy applied
 	InputBytes   uint64    // Upload bytes
 	OutputBytes  uint64    // Download bytes
+
+	// QinQ VLAN context (for European PoI deployments)
+	STag uint16 // Service VLAN (outer, 802.1ad)
+	CTag uint16 // Customer VLAN (inner, 802.1Q)
 }
 
 // ServerConfig configures the DHCP server
@@ -629,13 +633,24 @@ func (s *Server) handleRelease(req *dhcpv4.DHCPv4) {
 			pool.Release(lease.IP)
 		}
 
-		// Remove from fast path cache
+		// Remove from fast path cache (MAC-based)
 		macU64 := ebpf.MACToUint64(mac)
 		if err := s.loader.RemoveSubscriber(macU64); err != nil {
 			s.logger.Warn("Failed to remove from fast path cache",
 				zap.String("mac", mac.String()),
 				zap.Error(err),
 			)
+		}
+
+		// Remove from VLAN-based cache for QinQ deployments
+		if (lease.STag > 0 || lease.CTag > 0) && s.loader.HasVLANSupport() {
+			if err := s.loader.RemoveVLANSubscriber(lease.STag, lease.CTag); err != nil {
+				s.logger.Warn("Failed to remove from VLAN fast path cache",
+					zap.Uint16("s_tag", lease.STag),
+					zap.Uint16("c_tag", lease.CTag),
+					zap.Error(err),
+				)
+			}
 		}
 
 		s.logger.Info("DHCP RELEASE processed",
@@ -725,8 +740,6 @@ func (s *Server) updateFastPathCache(mac net.HardwareAddr, lease *Lease, pool *P
 		return nil
 	}
 
-	macU64 := ebpf.MACToUint64(mac)
-
 	assignment := &ebpf.PoolAssignment{
 		PoolID:      lease.PoolID,
 		AllocatedIP: ebpf.IPToUint32(lease.IP),
@@ -736,7 +749,32 @@ func (s *Server) updateFastPathCache(mac net.HardwareAddr, lease *Lease, pool *P
 		Flags:       0,
 	}
 
-	return s.loader.AddSubscriber(macU64, assignment)
+	// Always update MAC-based cache
+	macU64 := ebpf.MACToUint64(mac)
+	if err := s.loader.AddSubscriber(macU64, assignment); err != nil {
+		return err
+	}
+
+	// Also update VLAN-based cache for QinQ deployments
+	if lease.STag > 0 || lease.CTag > 0 {
+		if s.loader.HasVLANSupport() {
+			if err := s.loader.AddVLANSubscriber(lease.STag, lease.CTag, assignment); err != nil {
+				s.logger.Warn("Failed to update VLAN subscriber cache",
+					zap.Uint16("s_tag", lease.STag),
+					zap.Uint16("c_tag", lease.CTag),
+					zap.Error(err),
+				)
+			} else {
+				s.logger.Debug("Updated VLAN subscriber cache",
+					zap.Uint16("s_tag", lease.STag),
+					zap.Uint16("c_tag", lease.CTag),
+					zap.String("ip", lease.IP.String()),
+				)
+			}
+		}
+	}
+
+	return nil
 }
 
 // leaseCleanup periodically removes expired leases

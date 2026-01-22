@@ -5,6 +5,11 @@
  *
  * Fast path: Reply from cache (~10μs latency)
  * Slow path: Pass to userspace for new allocations (XDP_PASS)
+ *
+ * Supports:
+ * - Standard Ethernet (untagged)
+ * - Single VLAN (802.1Q)
+ * - Double VLAN / QinQ (802.1ad + 802.1Q)
  */
 
 #include <linux/bpf.h>
@@ -16,6 +21,28 @@
 #include <bpf/bpf_endian.h>
 
 #include "maps.h"
+
+/* VLAN header structure */
+struct vlan_hdr {
+	__be16 h_vlan_TCI;        /* priority (3) + DEI (1) + VLAN ID (12) */
+	__be16 h_vlan_encapsulated_proto;
+} __attribute__((packed));
+
+/* EtherTypes for VLAN */
+#define ETH_P_8021Q  0x8100   /* 802.1Q VLAN Extended Header */
+#define ETH_P_8021AD 0x88A8   /* 802.1ad Service VLAN (QinQ outer) */
+
+/* Extract VLAN ID from TCI */
+#define VLAN_VID_MASK 0x0FFF
+
+/* VLAN parsing context */
+struct vlan_info {
+	__u16 s_tag;           /* Outer VLAN (S-TAG) - 0 if single-tagged or untagged */
+	__u16 c_tag;           /* Inner VLAN (C-TAG) - 0 if untagged */
+	__u16 proto;           /* Final protocol after VLAN headers */
+	__u8  vlan_depth;      /* 0=untagged, 1=single, 2=double (QinQ) */
+	__u8  _pad;
+};
 
 /* DHCP packet structure (simplified) */
 struct dhcp_packet {
@@ -101,6 +128,58 @@ static __always_inline __u64 mac_to_u64(__u8 *mac) {
 		result = (result << 8) | mac[i];
 	}
 	return result;
+}
+
+/* Parse VLAN headers (supports untagged, 802.1Q, and QinQ 802.1ad)
+ * Returns pointer to payload after VLAN headers, or NULL on error
+ */
+static __always_inline void *parse_vlan_headers(struct ethhdr *eth, void *data_end,
+                                                 struct vlan_info *vinfo) {
+	void *payload = (void *)(eth + 1);
+	__u16 proto = bpf_ntohs(eth->h_proto);
+
+	/* Initialize VLAN info */
+	vinfo->s_tag = 0;
+	vinfo->c_tag = 0;
+	vinfo->vlan_depth = 0;
+	vinfo->proto = proto;
+
+	/* Check for outer VLAN tag (802.1ad S-TAG for QinQ) */
+	if (proto == ETH_P_8021AD) {
+		struct vlan_hdr *outer_vlan = payload;
+		if ((void *)(outer_vlan + 1) > data_end)
+			return NULL;
+
+		vinfo->s_tag = bpf_ntohs(outer_vlan->h_vlan_TCI) & VLAN_VID_MASK;
+		proto = bpf_ntohs(outer_vlan->h_vlan_encapsulated_proto);
+		payload = (void *)(outer_vlan + 1);
+		vinfo->vlan_depth = 1;
+	}
+
+	/* Check for inner VLAN tag (802.1Q C-TAG) */
+	if (proto == ETH_P_8021Q) {
+		struct vlan_hdr *inner_vlan = payload;
+		if ((void *)(inner_vlan + 1) > data_end)
+			return NULL;
+
+		/* If we already have an outer tag, this is the C-TAG
+		 * If not, treat this as a single-tagged frame (C-TAG only) */
+		__u16 vid = bpf_ntohs(inner_vlan->h_vlan_TCI) & VLAN_VID_MASK;
+		if (vinfo->vlan_depth == 0) {
+			/* Single-tagged: this is the C-TAG */
+			vinfo->c_tag = vid;
+			vinfo->vlan_depth = 1;
+		} else {
+			/* Double-tagged (QinQ): this is the C-TAG */
+			vinfo->c_tag = vid;
+			vinfo->vlan_depth = 2;
+		}
+		proto = bpf_ntohs(inner_vlan->h_vlan_encapsulated_proto);
+		payload = (void *)(inner_vlan + 1);
+	}
+
+	vinfo->proto = proto;
+	return payload;
 }
 
 /* Update statistics counters */
@@ -331,12 +410,18 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	struct ethhdr *eth = data;
 	CHECK_BOUNDS(eth, data_end, sizeof(*eth));
 
+	/* Parse VLAN headers (supports untagged, 802.1Q, QinQ) */
+	struct vlan_info vinfo;
+	void *l3_header = parse_vlan_headers(eth, data_end, &vinfo);
+	if (!l3_header)
+		return XDP_PASS;
+
 	/* Only process IPv4 */
-	if (eth->h_proto != bpf_htons(ETH_P_IP))
+	if (vinfo.proto != ETH_P_IP)
 		return XDP_PASS;
 
 	/* Parse IP header */
-	struct iphdr *ip = data + sizeof(*eth);
+	struct iphdr *ip = l3_header;
 	CHECK_BOUNDS(ip, data_end, sizeof(*ip));
 
 	/* Only process UDP */
@@ -377,9 +462,26 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	/* Extract client MAC address */
 	__u64 mac_addr = mac_to_u64(dhcp->chaddr);
 
-	/* Lookup subscriber in cache */
-	struct pool_assignment *assignment =
-		bpf_map_lookup_elem(&subscriber_pools, &mac_addr);
+	/* Lookup subscriber in cache
+	 * Strategy:
+	 * 1. If packet has VLAN tags, try VLAN-based lookup first (QinQ mode)
+	 * 2. Fall back to MAC-based lookup
+	 */
+	struct pool_assignment *assignment = NULL;
+
+	/* For tagged packets, try VLAN-based lookup first */
+	if (vinfo.vlan_depth > 0) {
+		struct vlan_key vkey = {
+			.s_tag = vinfo.s_tag,
+			.c_tag = vinfo.c_tag,
+		};
+		assignment = bpf_map_lookup_elem(&vlan_subscriber_pools, &vkey);
+	}
+
+	/* Fall back to MAC-based lookup */
+	if (!assignment) {
+		assignment = bpf_map_lookup_elem(&subscriber_pools, &mac_addr);
+	}
 
 	if (!assignment) {
 		/* CACHE MISS - Pass to userspace (slow path) */
