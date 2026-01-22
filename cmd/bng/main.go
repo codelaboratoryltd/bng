@@ -582,7 +582,8 @@ func parsePort(s string, defaultPort int) int {
 }
 
 // buildAuthConfig creates device authentication configuration from CLI flags.
-func buildAuthConfig() deviceauth.Config {
+// The logger parameter is used to warn about unknown auth modes.
+func buildAuthConfig(logger *zap.Logger) deviceauth.Config {
 	config := deviceauth.DefaultConfig()
 
 	switch authMode {
@@ -607,7 +608,7 @@ func buildAuthConfig() deviceauth.Config {
 		}
 
 	default:
-		// Treat unknown as none
+		logger.Warn("Unknown auth mode, defaulting to none", zap.String("mode", authMode))
 		config.Mode = deviceauth.AuthModeNone
 	}
 

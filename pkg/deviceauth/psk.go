@@ -90,9 +90,15 @@ func (a *PSKAuthenticator) loadPSK() error {
 		return fmt.Errorf("PSK is required")
 	}
 
-	// Validate PSK minimum length
+	// Validate PSK minimum length.
+	// We warn instead of erroring for PSKs < 16 chars to maintain backwards
+	// compatibility and allow for dev/test scenarios with simpler keys.
+	// For production use, RotatePSK() enforces the 16-char minimum.
+	// Consider using mTLS (AuthModeMTLS) for production deployments.
 	if len(psk) < 16 {
-		a.logger.Warn("PSK is shorter than recommended 16 characters")
+		a.logger.Warn("PSK is shorter than recommended 16 characters",
+			zap.Int("length", len(psk)),
+			zap.String("recommendation", "use at least 16 characters for production"))
 	}
 
 	a.psk = []byte(psk)

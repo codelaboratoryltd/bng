@@ -356,19 +356,22 @@ func (a *MTLSAuthenticator) ReloadCertificates() error {
 }
 
 // GenerateCSR generates a Certificate Signing Request for renewal.
-func (a *MTLSAuthenticator) GenerateCSR() ([]byte, error) {
+// Returns both the CSR (PEM-encoded) and the private key (PEM-encoded).
+// The caller is responsible for securely storing the private key until
+// the certificate is issued and installed.
+func (a *MTLSAuthenticator) GenerateCSR() (csr []byte, privateKey []byte, err error) {
 	a.mu.RLock()
 	identity := a.identity
 	a.mu.RUnlock()
 
 	if identity == nil {
-		return nil, fmt.Errorf("no device identity available")
+		return nil, nil, fmt.Errorf("no device identity available")
 	}
 
 	// Generate a new key pair for the CSR
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate key: %w", err)
+		return nil, nil, fmt.Errorf("failed to generate key: %w", err)
 	}
 
 	// Create CSR template
@@ -383,16 +386,22 @@ func (a *MTLSAuthenticator) GenerateCSR() ([]byte, error) {
 	// Create the CSR
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, template, key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create CSR: %w", err)
+		return nil, nil, fmt.Errorf("failed to create CSR: %w", err)
 	}
 
-	// Encode to PEM
+	// Encode CSR to PEM
 	csrPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "CERTIFICATE REQUEST",
 		Bytes: csrDER,
 	})
 
-	return csrPEM, nil
+	// Encode private key to PEM
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+
+	return csrPEM, keyPEM, nil
 }
 
 // CertificateExpiresWithin returns true if the cert expires within duration.
