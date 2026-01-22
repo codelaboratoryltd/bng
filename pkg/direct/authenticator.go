@@ -289,6 +289,13 @@ func (a *Authenticator) lookupONTMapping(ctx context.Context, req *subscriber.Se
 
 	// 3. Try BSS lookup
 	if a.bssClient != nil {
+		// Check context before BSS lookups
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		// Try circuit ID first
 		if req.CircuitID != "" {
 			mapping, err := a.bssClient.GetONTMappingByCircuitID(ctx, req.CircuitID)
@@ -296,6 +303,13 @@ func (a *Authenticator) lookupONTMapping(ctx context.Context, req *subscriber.Se
 				a.cacheMapping(mapping)
 				return mapping, nil
 			}
+		}
+
+		// Check context before next BSS lookup
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
 
 		// Try ONT serial

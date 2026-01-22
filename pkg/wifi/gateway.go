@@ -501,21 +501,21 @@ func (m *Manager) cleanupExpiredSessions() {
 	var expired []string
 
 	for macStr, session := range m.sessions {
-		expired_session := false
+		expiredSession := false
 
 		// Check lease expiry
 		if now.After(session.LeaseExpiry) {
-			expired_session = true
+			expiredSession = true
 		}
 
 		// Check grace period expiry for unauthenticated sessions
 		if session.State == StateGracePeriod && !session.Authenticated {
 			if now.After(session.GracePeriodEnds) {
-				expired_session = true
+				expiredSession = true
 			}
 		}
 
-		if expired_session {
+		if expiredSession {
 			expired = append(expired, macStr)
 		}
 	}

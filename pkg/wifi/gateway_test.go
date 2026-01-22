@@ -1,6 +1,7 @@
 package wifi
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -225,7 +226,7 @@ func TestManager_Stats(t *testing.T) {
 	// Create a few sessions
 	for i := 0; i < 3; i++ {
 		mac := net.HardwareAddr{0x00, byte(i), 0x22, 0x33, 0x44, 0x55}
-		ip := net.ParseIP("10.0.1." + string(rune('0'+100+i)))
+		ip := net.ParseIP(fmt.Sprintf("10.0.1.%d", 100+i))
 		_, _ = mgr.CreateSession(mac, "test", 1, ip)
 	}
 
