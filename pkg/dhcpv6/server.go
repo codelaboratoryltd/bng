@@ -44,6 +44,7 @@ type Server struct {
 	rebindsRecv     uint64
 	releasesRecv    uint64
 	declinesRecv    uint64
+	confirmsRecv    uint64
 }
 
 // AddressPool manages IPv6 address allocation
@@ -249,6 +250,8 @@ func NewPrefixPool(cidr string, delegationLen uint8, preferred, valid uint32) (*
 	}
 
 	baseIP := ipnet.IP.To16()
+	indexBits := int(delegationLen) - ones
+
 	for i := 0; i < numPrefixes; i++ {
 		prefix := make(net.IP, 16)
 		copy(prefix, baseIP)
@@ -257,23 +260,21 @@ func NewPrefixPool(cidr string, delegationLen uint8, preferred, valid uint32) (*
 		// The index bits need to be placed at the boundary between the base prefix
 		// and the delegation length. For example, /48 to /56 means 8 bits of indexing
 		// starting at bit position 48.
-		indexBits := int(delegationLen) - ones
-		byteOffset := ones / 8
-		bitOffset := ones % 8
+		//
+		// We need to place the index value 'i' into bits [ones, delegationLen).
+		// This is done by setting individual bits in the correct byte positions.
+		idx := i
 
-		// Set the index bits in the prefix
-		idx := uint64(i)
-		for b := 0; b < (indexBits+7)/8; b++ {
-			bytePos := byteOffset + b
-			if bytePos >= 16 {
-				break
-			}
-			// Calculate which bits of the index go into this byte
-			shift := indexBits - (b+1)*8 + bitOffset
-			if shift >= 0 {
-				prefix[bytePos] |= byte(idx >> shift)
-			} else {
-				prefix[bytePos] |= byte(idx << (-shift))
+		// Set each bit of the index in the appropriate position
+		for bit := 0; bit < indexBits; bit++ {
+			// bit 0 of index goes to bit position (delegationLen - 1), i.e., the rightmost bit of the delegated prefix
+			// bit (indexBits-1) of index goes to bit position 'ones', i.e., the leftmost bit after the base prefix
+			bitPos := int(delegationLen) - 1 - bit
+			bytePos := bitPos / 8
+			bitInByte := 7 - (bitPos % 8)
+
+			if (idx & (1 << bit)) != 0 {
+				prefix[bytePos] |= (1 << bitInByte)
 			}
 		}
 
@@ -394,6 +395,9 @@ func (s *Server) handleMessage(msg *Message, addr *net.UDPAddr) {
 	case MsgTypeRequest:
 		atomic.AddUint64(&s.requestsRecv, 1)
 		s.handleRequest(msg, addr)
+	case MsgTypeConfirm:
+		atomic.AddUint64(&s.confirmsRecv, 1)
+		s.handleConfirm(msg, addr)
 	case MsgTypeRenew:
 		atomic.AddUint64(&s.renewsRecv, 1)
 		s.handleRenew(msg, addr)
@@ -474,6 +478,79 @@ func (s *Server) handleRequest(msg *Message, addr *net.UDPAddr) {
 	response := s.buildReply(msg, clientDUID, addr.IP)
 	if response == nil {
 		return
+	}
+
+	s.sendResponse(response, addr)
+	atomic.AddUint64(&s.repliesSent, 1)
+}
+
+// handleConfirm handles a Confirm message
+// Per RFC 8415, the server responds with a Reply indicating whether the
+// addresses the client is using are appropriate for the link.
+func (s *Server) handleConfirm(msg *Message, addr *net.UDPAddr) {
+	s.logger.Debug("Received Confirm",
+		zap.String("from", addr.String()),
+	)
+
+	clientIDOpt := msg.GetOption(OptClientID)
+	if clientIDOpt == nil {
+		return
+	}
+
+	clientDUID := string(clientIDOpt.Data)
+
+	// Check if we have a binding for this client
+	s.leasesMu.RLock()
+	lease, hasLease := s.leases[clientDUID]
+	s.leasesMu.RUnlock()
+
+	// Verify addresses in IA_NA options are valid for this link
+	addressValid := false
+	for _, ianaOpt := range msg.GetAllOptions(OptIANA) {
+		iana, err := ParseIANA(ianaOpt.Data)
+		if err != nil {
+			continue
+		}
+
+		// Check each address in the IA_NA
+		for _, iaAddrOpt := range iana.Options {
+			if iaAddrOpt.Code != OptIAAddr {
+				continue
+			}
+			iaAddr, err := ParseIAAddress(iaAddrOpt.Data)
+			if err != nil {
+				continue
+			}
+
+			// Check if address is in our pool
+			if s.addressPool != nil && s.addressPool.network.Contains(iaAddr.Address) {
+				// If client has a lease, verify the address matches
+				if hasLease && lease.Address != nil && lease.Address.Equal(iaAddr.Address) {
+					addressValid = true
+				} else if !hasLease {
+					// No lease but address is in our pool - consider it valid
+					addressValid = true
+				}
+			}
+		}
+	}
+
+	// Build reply
+	response := &Message{
+		Type:          MsgTypeReply,
+		TransactionID: msg.TransactionID,
+		Options: []Option{
+			MakeClientIDOption(clientIDOpt.Data),
+			MakeServerIDOption(s.serverDUID),
+		},
+	}
+
+	if addressValid {
+		response.Options = append(response.Options,
+			MakeStatusCodeOption(StatusSuccess, "Address confirmed"))
+	} else {
+		response.Options = append(response.Options,
+			MakeStatusCodeOption(StatusNotOnLink, "Address not appropriate for link"))
 	}
 
 	s.sendResponse(response, addr)
@@ -879,6 +956,7 @@ func (s *Server) GetStats() map[string]uint64 {
 		"rebinds_received":  atomic.LoadUint64(&s.rebindsRecv),
 		"releases_received": atomic.LoadUint64(&s.releasesRecv),
 		"declines_received": atomic.LoadUint64(&s.declinesRecv),
+		"confirms_received": atomic.LoadUint64(&s.confirmsRecv),
 		"active_leases":     uint64(leaseCount),
 	}
 }
