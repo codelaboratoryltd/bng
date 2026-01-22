@@ -10,7 +10,9 @@ import (
 	"go.uber.org/zap"
 )
 
-// isPermissionError checks if an error is due to missing network permissions (CAP_NET_ADMIN)
+// isPermissionError checks if an error is due to:
+// - missing network permissions (CAP_NET_ADMIN)
+// - missing network interfaces (common in CI environments)
 func isPermissionError(err error) bool {
 	if err == nil {
 		return false
@@ -19,7 +21,9 @@ func isPermissionError(err error) bool {
 	return strings.Contains(errStr, "operation not permitted") ||
 		strings.Contains(errStr, "permission denied") ||
 		strings.Contains(errStr, "EPERM") ||
-		strings.Contains(errStr, "not permitted")
+		strings.Contains(errStr, "not permitted") ||
+		strings.Contains(errStr, "Link not found") ||
+		strings.Contains(errStr, "no such device")
 }
 
 func TestLinkState_String(t *testing.T) {
