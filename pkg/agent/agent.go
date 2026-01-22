@@ -83,10 +83,16 @@ func New(config Config, logger *zap.Logger) (*Agent, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	bootstrap, err := NewBootstrap(config.Bootstrap, logger)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create bootstrap: %w", err)
+	}
+
 	a := &Agent{
 		config:      config,
 		logger:      logger,
-		bootstrap:   NewBootstrap(config.Bootstrap, logger),
+		bootstrap:   bootstrap,
 		state:       StateBootstrap,
 		startTime:   time.Now(),
 		subscribers: make(map[string]*Subscriber),
