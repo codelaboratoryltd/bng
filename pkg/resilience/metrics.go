@@ -52,12 +52,16 @@ type Metrics struct {
 
 	// References
 	manager *Manager
+
+	// Previous counter values for delta calculation
+	prevCounterValues map[prometheus.Counter]float64
 }
 
 // NewMetrics creates new resilience metrics.
 func NewMetrics(manager *Manager) *Metrics {
 	m := &Metrics{
-		manager: manager,
+		manager:           manager,
+		prevCounterValues: make(map[prometheus.Counter]float64),
 
 		partitionState: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{
@@ -359,9 +363,14 @@ func (m *Metrics) Collect() {
 	// Get stats from manager
 	stats := m.manager.Stats()
 
-	// Update partition counters
-	m.partitionsTotal.Add(float64(stats.TotalPartitions) - m.getCounterValue(m.partitionsTotal))
-	m.partitionTimeTotal.Add(stats.TotalPartitionTime.Seconds() - m.getCounterValue(m.partitionTimeTotal))
+	// Update partition counters and track the new values
+	partitionsValue := float64(stats.TotalPartitions)
+	m.partitionsTotal.Add(partitionsValue - m.getCounterValue(m.partitionsTotal))
+	m.updateCounterValue(m.partitionsTotal, partitionsValue)
+
+	partitionTimeValue := stats.TotalPartitionTime.Seconds()
+	m.partitionTimeTotal.Add(partitionTimeValue - m.getCounterValue(m.partitionTimeTotal))
+	m.updateCounterValue(m.partitionTimeTotal, partitionTimeValue)
 
 	if !stats.LastPartitionTime.IsZero() {
 		m.lastPartitionTime.Set(float64(stats.LastPartitionTime.Unix()))
@@ -383,18 +392,42 @@ func (m *Metrics) Collect() {
 	// Update queue metrics
 	enqueued, dequeued, expired, current := m.manager.requestQueue.Stats()
 	m.queueLength.Set(float64(current))
-	m.queuedTotal.Add(float64(enqueued) - m.getCounterValue(m.queuedTotal))
-	m.dequeuedTotal.Add(float64(dequeued) - m.getCounterValue(m.dequeuedTotal))
-	m.expiredTotal.Add(float64(expired) - m.getCounterValue(m.expiredTotal))
+
+	enqueuedValue := float64(enqueued)
+	m.queuedTotal.Add(enqueuedValue - m.getCounterValue(m.queuedTotal))
+	m.updateCounterValue(m.queuedTotal, enqueuedValue)
+
+	dequeuedValue := float64(dequeued)
+	m.dequeuedTotal.Add(dequeuedValue - m.getCounterValue(m.dequeuedTotal))
+	m.updateCounterValue(m.dequeuedTotal, dequeuedValue)
+
+	expiredValue := float64(expired)
+	m.expiredTotal.Add(expiredValue - m.getCounterValue(m.expiredTotal))
+	m.updateCounterValue(m.expiredTotal, expiredValue)
+
 	m.queueHighWaterMark.Set(float64(stats.QueueHighWaterMark))
 
 	// Update conflict metrics
 	_, partitionCount, conflictCount := m.manager.ConflictDetector().Stats()
-	m.conflictsDetected.Add(float64(stats.ConflictsDetected) - m.getCounterValue(m.conflictsDetected))
-	m.conflictsResolved.Add(float64(stats.ConflictsResolved) - m.getCounterValue(m.conflictsResolved))
+
+	conflictsDetectedValue := float64(stats.ConflictsDetected)
+	m.conflictsDetected.Add(conflictsDetectedValue - m.getCounterValue(m.conflictsDetected))
+	m.updateCounterValue(m.conflictsDetected, conflictsDetectedValue)
+
+	conflictsResolvedValue := float64(stats.ConflictsResolved)
+	m.conflictsResolved.Add(conflictsResolvedValue - m.getCounterValue(m.conflictsResolved))
+	m.updateCounterValue(m.conflictsResolved, conflictsResolvedValue)
+
 	m.conflictsPending.Set(float64(len(m.manager.ConflictDetector().GetUnresolvedConflicts())))
-	m.localWinsTotal.Add(float64(stats.LocalWins) - m.getCounterValue(m.localWinsTotal))
-	m.remoteWinsTotal.Add(float64(stats.RemoteWins) - m.getCounterValue(m.remoteWinsTotal))
+
+	localWinsValue := float64(stats.LocalWins)
+	m.localWinsTotal.Add(localWinsValue - m.getCounterValue(m.localWinsTotal))
+	m.updateCounterValue(m.localWinsTotal, localWinsValue)
+
+	remoteWinsValue := float64(stats.RemoteWins)
+	m.remoteWinsTotal.Add(remoteWinsValue - m.getCounterValue(m.remoteWinsTotal))
+	m.updateCounterValue(m.remoteWinsTotal, remoteWinsValue)
+
 	m.partitionAllocations.Set(float64(partitionCount))
 	_ = conflictCount // Already tracked via stats
 
@@ -402,26 +435,54 @@ func (m *Metrics) Collect() {
 	degradedAuths, reauthsCompleted, reauthsFailed,
 		acctBuffered, acctSynced, acctDropped := m.manager.RADIUSHandler().Stats()
 
-	m.degradedAuthsIssued.Add(float64(degradedAuths) - m.getCounterValue(m.degradedAuthsIssued))
+	degradedAuthsValue := float64(degradedAuths)
+	m.degradedAuthsIssued.Add(degradedAuthsValue - m.getCounterValue(m.degradedAuthsIssued))
+	m.updateCounterValue(m.degradedAuthsIssued, degradedAuthsValue)
+
 	m.cachedProfilesTotal.Set(float64(m.manager.RADIUSHandler().GetCachedProfileCount()))
 	m.reauthQueueLength.Set(float64(m.manager.RADIUSHandler().GetReauthQueueLength()))
-	m.reauthsCompleted.Add(float64(reauthsCompleted) - m.getCounterValue(m.reauthsCompleted))
-	m.reauthsFailed.Add(float64(reauthsFailed) - m.getCounterValue(m.reauthsFailed))
+
+	reauthsCompletedValue := float64(reauthsCompleted)
+	m.reauthsCompleted.Add(reauthsCompletedValue - m.getCounterValue(m.reauthsCompleted))
+	m.updateCounterValue(m.reauthsCompleted, reauthsCompletedValue)
+
+	reauthsFailedValue := float64(reauthsFailed)
+	m.reauthsFailed.Add(reauthsFailedValue - m.getCounterValue(m.reauthsFailed))
+	m.updateCounterValue(m.reauthsFailed, reauthsFailedValue)
+
 	m.acctBufferLength.Set(float64(m.manager.RADIUSHandler().GetBufferedAccountingCount()))
-	m.acctRecordsBuffered.Add(float64(acctBuffered) - m.getCounterValue(m.acctRecordsBuffered))
-	m.acctRecordsSynced.Add(float64(acctSynced) - m.getCounterValue(m.acctRecordsSynced))
-	m.acctRecordsDropped.Add(float64(acctDropped) - m.getCounterValue(m.acctRecordsDropped))
+
+	acctBufferedValue := float64(acctBuffered)
+	m.acctRecordsBuffered.Add(acctBufferedValue - m.getCounterValue(m.acctRecordsBuffered))
+	m.updateCounterValue(m.acctRecordsBuffered, acctBufferedValue)
+
+	acctSyncedValue := float64(acctSynced)
+	m.acctRecordsSynced.Add(acctSyncedValue - m.getCounterValue(m.acctRecordsSynced))
+	m.updateCounterValue(m.acctRecordsSynced, acctSyncedValue)
+
+	acctDroppedValue := float64(acctDropped)
+	m.acctRecordsDropped.Add(acctDroppedValue - m.getCounterValue(m.acctRecordsDropped))
+	m.updateCounterValue(m.acctRecordsDropped, acctDroppedValue)
 
 	// Update short leases
-	m.shortLeasesIssuedTotal.Add(float64(stats.ShortLeasesIssued) - m.getCounterValue(m.shortLeasesIssuedTotal))
+	shortLeasesValue := float64(stats.ShortLeasesIssued)
+	m.shortLeasesIssuedTotal.Add(shortLeasesValue - m.getCounterValue(m.shortLeasesIssuedTotal))
+	m.updateCounterValue(m.shortLeasesIssuedTotal, shortLeasesValue)
 }
 
-// getCounterValue gets the current value of a counter (for delta calculation).
-// Note: This is a simplification - in production you'd track previous values.
+// getCounterValue gets the previously recorded value of a counter for delta calculation.
+// This allows us to compute the delta between the current stat value and what we've
+// already added to the Prometheus counter.
 func (m *Metrics) getCounterValue(c prometheus.Counter) float64 {
-	// This would require internal tracking; returning 0 for simplicity
-	// In practice, we'd maintain lastValues map
+	if val, ok := m.prevCounterValues[c]; ok {
+		return val
+	}
 	return 0
+}
+
+// updateCounterValue updates the tracked previous value for a counter after adding a delta.
+func (m *Metrics) updateCounterValue(c prometheus.Counter, newValue float64) {
+	m.prevCounterValues[c] = newValue
 }
 
 // RecordPoolAlert records a pool alert.

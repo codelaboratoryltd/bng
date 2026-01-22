@@ -229,7 +229,7 @@ func (m *Manager) checkHealth() {
 }
 
 // transitionToPartitioned handles the transition to partitioned state.
-// Must be called with m.mu held.
+// Must be called with m.mu held. The lock remains held on return.
 func (m *Manager) transitionToPartitioned() {
 	oldState := m.state
 	m.state = StatePartitioned
@@ -239,35 +239,39 @@ func (m *Manager) transitionToPartitioned() {
 	m.stats.TotalPartitions++
 	m.stats.mu.Unlock()
 
-	m.mu.Unlock() // Release lock before calling handlers
+	// Copy handlers while holding the lock
+	handlers := make([]PartitionEventHandler, len(m.partitionHandlers))
+	copy(handlers, m.partitionHandlers)
+
+	// Capture values needed for event before releasing lock
+	partitionStart := m.partitionStart
+
+	// Release lock before calling handlers to avoid deadlock
+	m.mu.Unlock()
 
 	event := PartitionEvent{
 		OldState:  oldState,
 		NewState:  StatePartitioned,
-		Timestamp: m.partitionStart,
+		Timestamp: partitionStart,
 		Reason:    "health check failures exceeded threshold",
 	}
 
 	m.logger.Warn("Entering partitioned state",
 		zap.String("old_state", oldState.String()),
-		zap.Time("partition_start", m.partitionStart),
+		zap.Time("partition_start", partitionStart),
 	)
 
-	// Notify handlers
-	m.mu.RLock()
-	handlers := make([]PartitionEventHandler, len(m.partitionHandlers))
-	copy(handlers, m.partitionHandlers)
-	m.mu.RUnlock()
-
+	// Notify handlers without holding the lock
 	for _, handler := range handlers {
 		handler(event)
 	}
 
-	m.mu.Lock() // Re-acquire lock for caller
+	// Re-acquire lock for caller
+	m.mu.Lock()
 }
 
 // transitionToRecovering handles the transition to recovering state.
-// Must be called with m.mu held.
+// Must be called with m.mu held. The lock remains held on return.
 func (m *Manager) transitionToRecovering() {
 	oldState := m.state
 	m.state = StateRecovering
@@ -278,7 +282,12 @@ func (m *Manager) transitionToRecovering() {
 	m.stats.LastPartitionTime = m.partitionStart
 	m.stats.mu.Unlock()
 
-	m.mu.Unlock() // Release lock for recovery
+	// Copy handlers while holding the lock
+	handlers := make([]PartitionEventHandler, len(m.partitionHandlers))
+	copy(handlers, m.partitionHandlers)
+
+	// Release lock before calling handlers to avoid deadlock
+	m.mu.Unlock()
 
 	event := PartitionEvent{
 		OldState:  oldState,
@@ -293,12 +302,7 @@ func (m *Manager) transitionToRecovering() {
 		zap.Duration("partition_duration", partitionDuration),
 	)
 
-	// Notify handlers
-	m.mu.RLock()
-	handlers := make([]PartitionEventHandler, len(m.partitionHandlers))
-	copy(handlers, m.partitionHandlers)
-	m.mu.RUnlock()
-
+	// Notify handlers without holding the lock
 	for _, handler := range handlers {
 		handler(event)
 	}
@@ -306,7 +310,8 @@ func (m *Manager) transitionToRecovering() {
 	// Start reconciliation in background
 	go m.performReconciliation()
 
-	m.mu.Lock() // Re-acquire lock for caller
+	// Re-acquire lock for caller
+	m.mu.Lock()
 }
 
 // performReconciliation reconciles state after partition recovery.
@@ -399,6 +404,27 @@ func (m *Manager) performReconciliation() {
 
 // resolveConflict attempts to resolve an IP allocation conflict.
 func (m *Manager) resolveConflict(ctx context.Context, conflict *AllocationConflict) error {
+	// Validate conflict data
+	if conflict == nil {
+		return fmt.Errorf("conflict is nil")
+	}
+	if conflict.IP == nil {
+		return fmt.Errorf("conflict IP is nil")
+	}
+	if conflict.LocalAlloc.MAC == nil {
+		return fmt.Errorf("local allocation MAC is nil for IP %s", conflict.IP)
+	}
+	if conflict.RemoteAlloc.MAC == nil {
+		return fmt.Errorf("remote allocation MAC is nil for IP %s", conflict.IP)
+	}
+
+	// Check context cancellation
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled while resolving conflict for IP %s: %w", conflict.IP, ctx.Err())
+	default:
+	}
+
 	m.logger.Info("Resolving IP conflict",
 		zap.String("ip", conflict.IP.String()),
 		zap.String("local_mac", conflict.LocalAlloc.MAC.String()),
