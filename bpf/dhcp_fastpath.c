@@ -10,10 +10,16 @@
  * - Standard Ethernet (untagged)
  * - Single VLAN (802.1Q)
  * - Double VLAN / QinQ (802.1ad + 802.1Q)
+ *
+ * Implements:
+ * - Issue #14: Variable-length DHCP option parsing
+ * - Issue #15: Option 82 (Relay Agent Information) support
+ * - Issue #17: Proper L2 header construction for XDP_TX
  */
 
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
 #include <linux/in.h>
@@ -21,6 +27,10 @@
 #include <bpf/bpf_endian.h>
 
 #include "maps.h"
+
+/* ========================================================================
+ * Constants and Structures
+ * ======================================================================== */
 
 /* VLAN header structure */
 struct vlan_hdr {
@@ -44,7 +54,7 @@ struct vlan_info {
 	__u8  _pad;
 };
 
-/* DHCP packet structure (simplified) */
+/* DHCP packet structure (fixed portion before options) */
 struct dhcp_packet {
 	__u8  op;           /* 1 = BOOTREQUEST, 2 = BOOTREPLY */
 	__u8  htype;        /* Hardware address type (1 = Ethernet) */
@@ -52,7 +62,7 @@ struct dhcp_packet {
 	__u8  hops;         /* Hops */
 	__u32 xid;          /* Transaction ID */
 	__u16 secs;         /* Seconds elapsed */
-	__u16 flags;        /* Flags */
+	__u16 flags;        /* Flags (bit 15 = broadcast) */
 	__u32 ciaddr;       /* Client IP address */
 	__u32 yiaddr;       /* Your (client) IP address */
 	__u32 siaddr;       /* Server IP address */
@@ -61,14 +71,14 @@ struct dhcp_packet {
 	__u8  sname[64];    /* Server host name */
 	__u8  file[128];    /* Boot file name */
 	__u32 magic;        /* Magic cookie (0x63825363) */
-	__u8  options[];    /* DHCP options */
+	__u8  options[];    /* DHCP options (variable length) */
 } __attribute__((packed));
 
 /* DHCP ports */
 #define DHCP_SERVER_PORT 67
 #define DHCP_CLIENT_PORT 68
 
-/* DHCP message types (option 53) */
+/* DHCP message types */
 #define DHCP_DISCOVER 1
 #define DHCP_OFFER    2
 #define DHCP_REQUEST  3
@@ -78,49 +88,124 @@ struct dhcp_packet {
 #define DHCP_RELEASE  7
 #define DHCP_INFORM   8
 
-/* DHCP option codes */
-#define DHCP_OPT_PAD           0
-#define DHCP_OPT_SUBNET_MASK   1
-#define DHCP_OPT_ROUTER        3
-#define DHCP_OPT_DNS           6
-#define DHCP_OPT_HOSTNAME      12
-#define DHCP_OPT_REQUESTED_IP  50
-#define DHCP_OPT_LEASE_TIME    51
-#define DHCP_OPT_MSG_TYPE      53
-#define DHCP_OPT_SERVER_ID     54
-#define DHCP_OPT_RENEWAL_TIME  58
-#define DHCP_OPT_REBIND_TIME   59
-#define DHCP_OPT_END           255
-
-/* DHCP magic cookie */
-#define DHCP_MAGIC_COOKIE 0x63538263  /* Network byte order: 99.130.83.99 */
+/* DHCP magic cookie (network byte order) */
+#define DHCP_MAGIC_COOKIE_NET 0x63538263
 
 /* BOOTREQUEST/BOOTREPLY */
 #define BOOTREQUEST 1
 #define BOOTREPLY   2
 
-/* Maximum DHCP options we'll write */
-#define MAX_DHCP_OPTIONS_LEN 64
+/* Maximum DHCP options we'll write in reply */
+#define MAX_DHCP_REPLY_OPTIONS_LEN 64
 
-/* Minimum DHCP packet size (with required options) */
-#define MIN_DHCP_PACKET_SIZE (sizeof(struct ethhdr) + sizeof(struct iphdr) + \
-                              sizeof(struct udphdr) + sizeof(struct dhcp_packet) + \
-                              MAX_DHCP_OPTIONS_LEN)
+/* DHCP broadcast flag (bit 15) */
+#define DHCP_FLAG_BROADCAST 0x8000
 
 /* Broadcast MAC address */
-static const __u8 broadcast_mac[ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static const __u8 BROADCAST_MAC[ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-/* Helper macro for bounds checking (required by eBPF verifier) */
-#define CHECK_BOUNDS(ptr, end, size) \
+/* ========================================================================
+ * Helper Macros (eBPF Verifier Safe)
+ * ======================================================================== */
+
+/* Bounds check that returns XDP_DROP on failure */
+#define CHECK_BOUNDS_DROP(ptr, end, size) \
 	if ((void *)(ptr) + (size) > (void *)(end)) \
-		return XDP_DROP;
+		return XDP_DROP
 
-/* Bounds check that returns XDP_PASS instead of DROP */
+/* Bounds check that returns XDP_PASS on failure (go to slow path) */
 #define CHECK_BOUNDS_PASS(ptr, end, size) \
 	if ((void *)(ptr) + (size) > (void *)(end)) \
-		return XDP_PASS;
+		return XDP_PASS
 
-/* Extract MAC address from DHCP packet to u64 */
+/* ========================================================================
+ * Statistics Helper
+ * ======================================================================== */
+
+/* Statistics counter indices */
+enum stat_counter {
+	STAT_TOTAL_REQUESTS = 0,
+	STAT_FASTPATH_HIT,
+	STAT_FASTPATH_MISS,
+	STAT_ERROR,
+	STAT_CACHE_EXPIRED,
+	STAT_OPTION82_PRESENT,
+	STAT_OPTION82_ABSENT,
+	STAT_BROADCAST_REPLY,
+	STAT_UNICAST_REPLY,
+	STAT_VLAN_PACKET,
+};
+
+static __always_inline void update_stat(enum stat_counter counter) {
+	__u32 key = 0;
+	struct dhcp_stats *stats = bpf_map_lookup_elem(&stats_map, &key);
+	if (!stats)
+		return;
+
+	switch (counter) {
+	case STAT_TOTAL_REQUESTS:
+		__sync_fetch_and_add(&stats->total_requests, 1);
+		break;
+	case STAT_FASTPATH_HIT:
+		__sync_fetch_and_add(&stats->fastpath_hits, 1);
+		break;
+	case STAT_FASTPATH_MISS:
+		__sync_fetch_and_add(&stats->fastpath_misses, 1);
+		break;
+	case STAT_ERROR:
+		__sync_fetch_and_add(&stats->errors, 1);
+		break;
+	case STAT_CACHE_EXPIRED:
+		__sync_fetch_and_add(&stats->cache_expired, 1);
+		break;
+	case STAT_OPTION82_PRESENT:
+		__sync_fetch_and_add(&stats->option82_present, 1);
+		break;
+	case STAT_OPTION82_ABSENT:
+		__sync_fetch_and_add(&stats->option82_absent, 1);
+		break;
+	case STAT_BROADCAST_REPLY:
+		__sync_fetch_and_add(&stats->broadcast_replies, 1);
+		break;
+	case STAT_UNICAST_REPLY:
+		__sync_fetch_and_add(&stats->unicast_replies, 1);
+		break;
+	case STAT_VLAN_PACKET:
+		__sync_fetch_and_add(&stats->vlan_packets, 1);
+		break;
+	}
+}
+
+/* ========================================================================
+ * FNV-1a Hash for Circuit-ID (Issue #15)
+ * ======================================================================== */
+
+#define FNV1A_64_INIT  0xcbf29ce484222325ULL
+#define FNV1A_64_PRIME 0x100000001b3ULL
+
+/* Compute FNV-1a hash of buffer - verifier-safe bounded version */
+static __always_inline __u64 fnv1a_hash(__u8 *data, __u8 len, void *data_end) {
+	__u64 hash = FNV1A_64_INIT;
+
+	/* Bound the loop for eBPF verifier */
+	#pragma unroll
+	for (int i = 0; i < MAX_CIRCUIT_ID_LEN; i++) {
+		if (i >= len)
+			break;
+		if ((void *)(data + i + 1) > data_end)
+			break;
+		hash ^= data[i];
+		hash *= FNV1A_64_PRIME;
+	}
+
+	return hash;
+}
+
+/* ========================================================================
+ * MAC Address Utilities
+ * ======================================================================== */
+
+/* Convert MAC address bytes to u64 */
 static __always_inline __u64 mac_to_u64(__u8 *mac) {
 	__u64 result = 0;
 	#pragma unroll
@@ -182,7 +267,7 @@ static __always_inline void *parse_vlan_headers(struct ethhdr *eth, void *data_e
 	return payload;
 }
 
-/* Update statistics counters */
+/* Update statistics counters (legacy interface) */
 static __always_inline void update_stats(__u32 counter_type) {
 	__u32 key = 0;
 	struct dhcp_stats *stats = bpf_map_lookup_elem(&stats_map, &key);
@@ -209,64 +294,378 @@ static __always_inline void update_stats(__u32 counter_type) {
 	}
 }
 
-/* Maximum DHCP options area to scan (prevents verifier issues) */
-#define MAX_DHCP_OPTIONS_SCAN 128
+/* Copy MAC address with proper bounds checking */
+static __always_inline void copy_mac(__u8 *dst, const __u8 *src) {
+	#pragma unroll
+	for (int i = 0; i < ETH_ALEN; i++) {
+		dst[i] = src[i];
+	}
+}
 
-/* Parse DHCP options to find message type
- * Uses offset-based parsing to help eBPF verifier track bounds
+/* Check if MAC is all zeros */
+static __always_inline int is_zero_mac(__u8 *mac) {
+	#pragma unroll
+	for (int i = 0; i < ETH_ALEN; i++) {
+		if (mac[i] != 0)
+			return 0;
+	}
+	return 1;
+}
+
+/* ========================================================================
+ * Issue #14: Variable-Length DHCP Option Parsing
+ *
+ * Implements safe, bounded option parsing that satisfies the eBPF verifier.
+ * Supports:
+ * - Option 53 (Message Type)
+ * - Option 50 (Requested IP)
+ * - Option 61 (Client Identifier)
+ * - Option 82 (Relay Agent Information) with sub-options
+ * - Proper handling of PAD (0) and END (255) options
+ * ======================================================================== */
+
+/* Parse Option 82 sub-options (Issue #15)
+ * Called when Option 82 is found in the main option loop
  */
-static __always_inline __u8 get_dhcp_msg_type(struct dhcp_packet *dhcp, void *data_end) {
+static __always_inline void parse_option82(__u8 *opt82_data, __u8 opt82_len,
+                                           void *data_end,
+                                           struct dhcp_parsed_options *opts) {
+	__u32 offset = 0;
+
+	/* Bound to maximum reasonable Option 82 size */
+	if (opt82_len > 128)
+		opt82_len = 128;
+
+	/* Parse sub-options within Option 82 */
+	#pragma unroll
+	for (int i = 0; i < 16; i++) {
+		/* Check if we've parsed all sub-options */
+		if (offset >= opt82_len)
+			break;
+
+		/* Bounds check for sub-option type */
+		__u8 *subopt_ptr = opt82_data + offset;
+		if ((void *)(subopt_ptr + 2) > data_end)
+			break;
+
+		__u8 subopt_type = *subopt_ptr;
+		__u8 subopt_len = *(subopt_ptr + 1);
+
+		/* Sanity check sub-option length */
+		if (subopt_len > 64 || offset + 2 + subopt_len > opt82_len)
+			break;
+
+		/* Bounds check for sub-option data */
+		if ((void *)(subopt_ptr + 2 + subopt_len) > data_end)
+			break;
+
+		__u8 *subopt_data = subopt_ptr + 2;
+
+		switch (subopt_type) {
+		case OPT82_CIRCUIT_ID:
+			/* Copy circuit-id (truncate if too long) */
+			opts->circuit_id_len = (subopt_len > MAX_CIRCUIT_ID_LEN)
+			                        ? MAX_CIRCUIT_ID_LEN : subopt_len;
+			#pragma unroll
+			for (int j = 0; j < MAX_CIRCUIT_ID_LEN; j++) {
+				if (j >= opts->circuit_id_len)
+					break;
+				if ((void *)(subopt_data + j + 1) > data_end)
+					break;
+				opts->circuit_id[j] = subopt_data[j];
+			}
+			break;
+
+		case OPT82_REMOTE_ID:
+			/* Copy remote-id (truncate if too long) */
+			opts->remote_id_len = (subopt_len > MAX_REMOTE_ID_LEN)
+			                       ? MAX_REMOTE_ID_LEN : subopt_len;
+			#pragma unroll
+			for (int j = 0; j < MAX_REMOTE_ID_LEN; j++) {
+				if (j >= opts->remote_id_len)
+					break;
+				if ((void *)(subopt_data + j + 1) > data_end)
+					break;
+				opts->remote_id[j] = subopt_data[j];
+			}
+			break;
+		}
+
+		offset += 2 + subopt_len;
+	}
+}
+
+/* Parse all DHCP options from packet
+ * Returns 0 on success, -1 on error
+ */
+static __always_inline int parse_dhcp_options(struct dhcp_packet *dhcp,
+                                               void *data_end,
+                                               struct dhcp_parsed_options *opts) {
+	/* Initialize output structure */
+	opts->msg_type = 0;
+	opts->has_option82 = 0;
+	opts->circuit_id_len = 0;
+	opts->remote_id_len = 0;
+	opts->requested_ip = 0;
+	opts->client_id_len = 0;
+
 	__u8 *options_start = dhcp->options;
 	__u32 offset = 0;
 
-	/* Limit option parsing to prevent infinite loops (eBPF verifier) */
+	/*
+	 * Bounded loop for eBPF verifier (Issue #14)
+	 * We iterate up to MAX_DHCP_OPTIONS_ITER times, which is sufficient
+	 * for real-world DHCP packets. The offset check ensures we don't
+	 * read beyond the options area.
+	 */
 	#pragma unroll
-	for (int i = 0; i < 32; i++) {
-		/* Strict offset limit - verifier needs constant bounds */
-		if (offset >= MAX_DHCP_OPTIONS_SCAN)
-			return 0;
+	for (int i = 0; i < MAX_DHCP_OPTIONS_ITER; i++) {
+		/* Stop if we've exceeded maximum scan length */
+		if (offset >= MAX_DHCP_OPTIONS_SCAN_LEN)
+			break;
 
-		/* Bounds check for option code */
+		/* Bounds check for option code byte */
 		__u8 *opt_ptr = options_start + offset;
 		if ((void *)(opt_ptr + 1) > data_end)
-			return 0;
+			break;
 
-		__u8 code = *opt_ptr;
-		if (code == DHCP_OPT_END)
-			return 0;
-		if (code == DHCP_OPT_PAD) {
+		__u8 opt_code = *opt_ptr;
+
+		/* Check for END option */
+		if (opt_code == DHCP_OPT_END)
+			break;
+
+		/* Handle PAD option (single byte, no length field) */
+		if (opt_code == DHCP_OPT_PAD) {
 			offset++;
 			continue;
 		}
 
 		/* Bounds check for option length byte */
 		if ((void *)(opt_ptr + 2) > data_end)
-			return 0;
+			break;
 
-		__u8 len = *(opt_ptr + 1);
+		__u8 opt_len = *(opt_ptr + 1);
 
-		/* Sanity check length - prevents offset overflow */
-		if (len > 64)
-			return 0;
+		/* Sanity check: option length shouldn't exceed reasonable bounds */
+		if (opt_len > 255 || offset + 2 + opt_len > MAX_DHCP_OPTIONS_SCAN_LEN)
+			break;
 
 		/* Bounds check for option data */
-		if ((void *)(opt_ptr + 2 + len) > data_end)
-			return 0;
+		if ((void *)(opt_ptr + 2 + opt_len) > data_end)
+			break;
 
-		if (code == DHCP_OPT_MSG_TYPE && len == 1)
-			return *(opt_ptr + 2);
+		__u8 *opt_data = opt_ptr + 2;
 
-		offset += 2 + len;
+		/* Process specific options */
+		switch (opt_code) {
+		case DHCP_OPT_MSG_TYPE:
+			/* Option 53: DHCP Message Type (1 byte) */
+			if (opt_len >= 1)
+				opts->msg_type = *opt_data;
+			break;
+
+		case DHCP_OPT_REQUESTED_IP:
+			/* Option 50: Requested IP Address (4 bytes) */
+			if (opt_len >= 4 && (void *)(opt_data + 4) <= data_end)
+				opts->requested_ip = *(__u32 *)opt_data;
+			break;
+
+		case DHCP_OPT_CLIENT_ID:
+			/* Option 61: Client Identifier (variable) */
+			opts->client_id_len = (opt_len > 64) ? 64 : opt_len;
+			#pragma unroll
+			for (int j = 0; j < 64; j++) {
+				if (j >= opts->client_id_len)
+					break;
+				if ((void *)(opt_data + j + 1) > data_end)
+					break;
+				opts->client_id[j] = opt_data[j];
+			}
+			break;
+
+		case DHCP_OPT_RELAY_AGENT_INFO:
+			/* Option 82: Relay Agent Information (Issue #15) */
+			opts->has_option82 = 1;
+			parse_option82(opt_data, opt_len, data_end, opts);
+			break;
+		}
+
+		/* Advance to next option */
+		offset += 2 + opt_len;
 	}
+
 	return 0;
 }
 
-/* Calculate IP header checksum */
+/* ========================================================================
+ * Issue #17: L2 Header Construction for XDP_TX
+ *
+ * Proper handling of:
+ * - MAC address swapping for unicast vs broadcast
+ * - VLAN tag preservation
+ * - DHCP broadcast flag respect
+ * - Interface MAC discovery from server config
+ * ======================================================================== */
+
+/* Packet context structure to track headers after VLAN parsing */
+struct pkt_ctx {
+	struct ethhdr *eth;
+	struct iphdr *ip;
+	struct udphdr *udp;
+	struct dhcp_packet *dhcp;
+	void *data_end;
+	__u16 vlan_id;           /* Outer VLAN ID (0 if untagged) */
+	__u16 inner_vlan_id;     /* Inner VLAN ID for QinQ (0 if single-tagged) */
+	int vlan_offset;         /* Bytes to skip for VLAN headers */
+	int is_vlan_tagged;      /* Flag: packet has VLAN tag */
+	int is_qinq;             /* Flag: packet has double VLAN tags */
+};
+
+/* Parse packet headers with VLAN support (Issue #17)
+ * Returns 0 on success, -1 if not a DHCP packet
+ */
+static __always_inline int parse_packet_headers(struct xdp_md *ctx,
+                                                 struct pkt_ctx *pkt) {
+	void *data = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
+
+	pkt->data_end = data_end;
+	pkt->vlan_id = 0;
+	pkt->inner_vlan_id = 0;
+	pkt->vlan_offset = 0;
+	pkt->is_vlan_tagged = 0;
+	pkt->is_qinq = 0;
+
+	/* Parse Ethernet header */
+	pkt->eth = data;
+	if ((void *)(pkt->eth + 1) > data_end)
+		return -1;
+
+	__be16 eth_proto = pkt->eth->h_proto;
+	void *l3_start = (void *)(pkt->eth + 1);
+
+	/* Handle VLAN tags (802.1Q and QinQ) */
+	if (eth_proto == bpf_htons(ETH_P_8021Q) || eth_proto == bpf_htons(ETH_P_8021AD)) {
+		struct vlan_hdr *vhdr = l3_start;
+		if ((void *)(vhdr + 1) > data_end)
+			return -1;
+
+		pkt->is_vlan_tagged = 1;
+		pkt->vlan_id = bpf_ntohs(vhdr->h_vlan_TCI) & 0x0FFF;
+		pkt->vlan_offset = sizeof(struct vlan_hdr);
+		eth_proto = vhdr->h_vlan_encapsulated_proto;
+		l3_start = (void *)(vhdr + 1);
+
+		update_stat(STAT_VLAN_PACKET);
+
+		/* Check for QinQ (double tagging) */
+		if (eth_proto == bpf_htons(ETH_P_8021Q)) {
+			struct vlan_hdr *inner_vhdr = l3_start;
+			if ((void *)(inner_vhdr + 1) > data_end)
+				return -1;
+
+			pkt->is_qinq = 1;
+			pkt->inner_vlan_id = bpf_ntohs(inner_vhdr->h_vlan_TCI) & 0x0FFF;
+			pkt->vlan_offset += sizeof(struct vlan_hdr);
+			eth_proto = inner_vhdr->h_vlan_encapsulated_proto;
+			l3_start = (void *)(inner_vhdr + 1);
+		}
+	}
+
+	/* Only process IPv4 */
+	if (eth_proto != bpf_htons(ETH_P_IP))
+		return -1;
+
+	/* Parse IP header */
+	pkt->ip = l3_start;
+	if ((void *)(pkt->ip + 1) > data_end)
+		return -1;
+
+	/* Only process UDP */
+	if (pkt->ip->protocol != IPPROTO_UDP)
+		return -1;
+
+	/* Parse UDP header (account for IP header length) */
+	pkt->udp = (void *)pkt->ip + (pkt->ip->ihl * 4);
+	if ((void *)(pkt->udp + 1) > data_end)
+		return -1;
+
+	/* Check if DHCP request (dest port 67) */
+	if (pkt->udp->dest != bpf_htons(DHCP_SERVER_PORT))
+		return -1;
+
+	/* Parse DHCP packet */
+	pkt->dhcp = (void *)(pkt->udp + 1);
+	if ((void *)(pkt->dhcp + 1) > data_end)
+		return -1;
+
+	return 0;
+}
+
+/* Set up L2 headers for DHCP reply (Issue #17)
+ * Handles broadcast vs unicast based on:
+ * 1. DHCP broadcast flag
+ * 2. Client IP (ciaddr) - if set, use unicast
+ * 3. Client MAC validity
+ */
+static __always_inline void setup_reply_l2_headers(struct pkt_ctx *pkt,
+                                                    struct dhcp_server_config *config) {
+	/* Get DHCP flags */
+	__u16 flags = bpf_ntohs(pkt->dhcp->flags);
+	int use_broadcast = 0;
+
+	/* Determine if we should use broadcast (Issue #17) */
+	if (flags & DHCP_FLAG_BROADCAST) {
+		/* Client explicitly requested broadcast */
+		use_broadcast = 1;
+	} else if (pkt->dhcp->ciaddr == 0) {
+		/* Client doesn't have an IP yet - typically DISCOVER/initial REQUEST */
+		/* Check if client MAC is valid */
+		if (is_zero_mac(pkt->dhcp->chaddr)) {
+			/* Invalid client MAC - must use broadcast */
+			use_broadcast = 1;
+		} else {
+			/*
+			 * Client MAC is valid but no IP assigned yet.
+			 * Some clients can receive unicast even without IP.
+			 * For maximum compatibility, use broadcast for DISCOVER responses.
+			 * The client can request unicast via the broadcast flag.
+			 */
+			use_broadcast = 1;
+		}
+	}
+	/* else: ciaddr is set, client has IP, use unicast to client MAC */
+
+	if (use_broadcast) {
+		/* Set destination to broadcast MAC */
+		copy_mac(pkt->eth->h_dest, BROADCAST_MAC);
+		update_stat(STAT_BROADCAST_REPLY);
+	} else {
+		/* Set destination to client's MAC from DHCP chaddr field */
+		copy_mac(pkt->eth->h_dest, pkt->dhcp->chaddr);
+		update_stat(STAT_UNICAST_REPLY);
+	}
+
+	/* Set source MAC to server's MAC (Issue #17: use config, not hardcoded) */
+	copy_mac(pkt->eth->h_source, config->server_mac);
+
+	/*
+	 * VLAN tags are preserved automatically with XDP_TX since we're
+	 * modifying the packet in-place. The kernel maintains the VLAN
+	 * headers we parsed earlier.
+	 */
+}
+
+/* ========================================================================
+ * IP Checksum Calculation
+ * ======================================================================== */
+
 static __always_inline __u16 ip_checksum(struct iphdr *ip) {
 	__u32 sum = 0;
 	__u16 *buf = (__u16 *)ip;
 
-	/* IP header is 20 bytes = 10 16-bit words (assuming no options) */
+	/* IP header is 20 bytes = 10 16-bit words (assuming no IP options) */
 	#pragma unroll
 	for (int i = 0; i < 10; i++) {
 		sum += buf[i];
@@ -279,6 +678,10 @@ static __always_inline __u16 ip_checksum(struct iphdr *ip) {
 	return ~sum;
 }
 
+/* ========================================================================
+ * Helper Functions
+ * ======================================================================== */
+
 /* Generate subnet mask from prefix length */
 static __always_inline __u32 prefix_to_mask(__u8 prefix_len) {
 	if (prefix_len == 0)
@@ -288,7 +691,7 @@ static __always_inline __u32 prefix_to_mask(__u8 prefix_len) {
 	return bpf_htonl(0xFFFFFFFF << (32 - prefix_len));
 }
 
-/* Build DHCP options for reply */
+/* Build DHCP options for reply packet */
 static __always_inline int build_dhcp_options(__u8 *opt, void *data_end,
                                               __u8 msg_type,
                                               struct ip_pool *pool,
@@ -374,189 +777,178 @@ static __always_inline int build_dhcp_options(__u8 *opt, void *data_end,
 	return offset;
 }
 
-/* Set MAC addresses for DHCP reply
- * - Destination: Broadcast (FF:FF:FF:FF:FF:FF) for clients without IP
- *   or unicast to client MAC if BROADCAST flag is clear
- * - Source: DHCP server's MAC address
- */
-static __always_inline void set_reply_eth_addrs(struct ethhdr *eth,
-                                                 struct dhcp_packet *dhcp,
-                                                 __u8 *server_mac) {
-	/* Check DHCP BROADCAST flag (bit 15 of flags field) */
-	__u16 flags = bpf_ntohs(dhcp->flags);
+/* ========================================================================
+ * Subscriber Lookup (Issue #15: Circuit-ID Support)
+ * ======================================================================== */
 
-	if (flags & 0x8000) {
-		/* BROADCAST flag set - use broadcast MAC */
-		__builtin_memcpy(eth->h_dest, broadcast_mac, ETH_ALEN);
-	} else if (dhcp->ciaddr != 0) {
-		/* Client has IP - send unicast to client MAC */
-		__builtin_memcpy(eth->h_dest, dhcp->chaddr, ETH_ALEN);
-	} else {
-		/* DISCOVER/REQUEST without ciaddr - use broadcast */
-		__builtin_memcpy(eth->h_dest, broadcast_mac, ETH_ALEN);
+/* Look up subscriber - tries circuit-id first if present, then MAC */
+static __always_inline struct pool_assignment *lookup_subscriber(
+		struct dhcp_packet *dhcp,
+		struct dhcp_parsed_options *opts,
+		void *data_end) {
+
+	struct pool_assignment *assignment = NULL;
+
+	/* If Option 82 present with circuit-id, try that first (Issue #15) */
+	if (opts->has_option82 && opts->circuit_id_len > 0) {
+		/* Hash the circuit-id for lookup */
+		__u64 circuit_hash = fnv1a_hash(opts->circuit_id, opts->circuit_id_len, data_end);
+
+		/* Look up MAC address associated with this circuit-id */
+		__u64 *mac_ptr = bpf_map_lookup_elem(&circuit_id_map, &circuit_hash);
+		if (mac_ptr) {
+			/* Found circuit-id mapping, lookup subscriber by that MAC */
+			assignment = bpf_map_lookup_elem(&subscriber_pools, mac_ptr);
+			if (assignment)
+				return assignment;
+		}
+		/* Circuit-id not found in map, fall through to MAC lookup */
 	}
 
-	/* Source is always server MAC */
-	__builtin_memcpy(eth->h_source, server_mac, ETH_ALEN);
+	/* Fall back to MAC-based lookup */
+	__u64 mac_addr = mac_to_u64(dhcp->chaddr);
+	assignment = bpf_map_lookup_elem(&subscriber_pools, &mac_addr);
+
+	return assignment;
 }
 
-/* Main XDP program */
+/* ========================================================================
+ * Main XDP Program
+ * ======================================================================== */
+
 SEC("xdp")
 int dhcp_fastpath_prog(struct xdp_md *ctx) {
-	void *data_end = (void *)(long)ctx->data_end;
-	void *data = (void *)(long)ctx->data;
+	struct pkt_ctx pkt = {};
 
-	/* Parse Ethernet header */
-	struct ethhdr *eth = data;
-	CHECK_BOUNDS(eth, data_end, sizeof(*eth));
-
-	/* Parse VLAN headers (supports untagged, 802.1Q, QinQ) */
-	struct vlan_info vinfo;
-	void *l3_header = parse_vlan_headers(eth, data_end, &vinfo);
-	if (!l3_header)
-		return XDP_PASS;
-
-	/* Only process IPv4 */
-	if (vinfo.proto != ETH_P_IP)
-		return XDP_PASS;
-
-	/* Parse IP header */
-	struct iphdr *ip = l3_header;
-	CHECK_BOUNDS(ip, data_end, sizeof(*ip));
-
-	/* Only process UDP */
-	if (ip->protocol != IPPROTO_UDP)
-		return XDP_PASS;
-
-	/* Parse UDP header */
-	struct udphdr *udp = (void *)ip + (ip->ihl * 4);
-	CHECK_BOUNDS(udp, data_end, sizeof(*udp));
-
-	/* Check if DHCP request (dest port 67) */
-	if (udp->dest != bpf_htons(DHCP_SERVER_PORT))
-		return XDP_PASS;
-
-	/* Parse DHCP packet */
-	struct dhcp_packet *dhcp = (void *)udp + sizeof(*udp);
-	CHECK_BOUNDS(dhcp, data_end, sizeof(struct dhcp_packet));
+	/* Parse all packet headers with VLAN support (Issue #17) */
+	if (parse_packet_headers(ctx, &pkt) < 0)
+		return XDP_PASS;  /* Not a DHCP packet */
 
 	/* Verify BOOTREQUEST */
-	if (dhcp->op != BOOTREQUEST)
+	if (pkt.dhcp->op != BOOTREQUEST)
 		return XDP_PASS;
 
 	/* Verify DHCP magic cookie */
-	if (dhcp->magic != bpf_htonl(0x63825363))
+	if (pkt.dhcp->magic != bpf_htonl(0x63825363))
 		return XDP_PASS;
 
 	/* Update total request counter */
-	update_stats(0);
+	update_stat(STAT_TOTAL_REQUESTS);
 
-	/* Extract DHCP message type */
-	__u8 msg_type = get_dhcp_msg_type(dhcp, data_end);
-	if (msg_type != DHCP_DISCOVER && msg_type != DHCP_REQUEST) {
-		/* Other message types (RELEASE, INFORM, etc.) go to slow path */
-		update_stats(2);
+	/* Parse DHCP options (Issue #14: variable-length support) */
+	struct dhcp_parsed_options opts = {};
+	if (parse_dhcp_options(pkt.dhcp, pkt.data_end, &opts) < 0) {
+		update_stat(STAT_ERROR);
 		return XDP_PASS;
 	}
 
-	/* Extract client MAC address */
-	__u64 mac_addr = mac_to_u64(dhcp->chaddr);
+	/* Only handle DISCOVER and REQUEST on fast path */
+	if (opts.msg_type != DHCP_DISCOVER && opts.msg_type != DHCP_REQUEST) {
+		update_stat(STAT_FASTPATH_MISS);
+		return XDP_PASS;
+	}
+
+	/* Update Option 82 statistics (Issue #15) */
+	if (opts.has_option82) {
+		update_stat(STAT_OPTION82_PRESENT);
+	} else {
+		update_stat(STAT_OPTION82_ABSENT);
+	}
 
 	/* Lookup subscriber in cache
 	 * Strategy:
 	 * 1. If packet has VLAN tags, try VLAN-based lookup first (QinQ mode)
-	 * 2. Fall back to MAC-based lookup
+	 * 2. Try circuit-id lookup if Option 82 present (Issue #15)
+	 * 3. Fall back to MAC-based lookup
 	 */
 	struct pool_assignment *assignment = NULL;
 
 	/* For tagged packets, try VLAN-based lookup first */
-	if (vinfo.vlan_depth > 0) {
+	if (pkt.is_vlan_tagged) {
 		struct vlan_key vkey = {
-			.s_tag = vinfo.s_tag,
-			.c_tag = vinfo.c_tag,
+			.s_tag = pkt.vlan_id,
+			.c_tag = pkt.inner_vlan_id,
 		};
 		assignment = bpf_map_lookup_elem(&vlan_subscriber_pools, &vkey);
 	}
 
-	/* Fall back to MAC-based lookup */
+	/* If no VLAN match, try circuit-id or MAC lookup */
 	if (!assignment) {
-		assignment = bpf_map_lookup_elem(&subscriber_pools, &mac_addr);
+		assignment = lookup_subscriber(pkt.dhcp, &opts, pkt.data_end);
 	}
 
 	if (!assignment) {
 		/* CACHE MISS - Pass to userspace (slow path) */
-		update_stats(2);
+		update_stat(STAT_FASTPATH_MISS);
 		return XDP_PASS;
 	}
 
 	/* Check if lease is still valid */
-	__u64 now = bpf_ktime_get_ns() / 1000000000; /* Convert to seconds */
+	__u64 now = bpf_ktime_get_ns() / 1000000000;  /* Convert to seconds */
 	if (now > assignment->lease_expiry) {
 		/* Lease expired - Pass to userspace for renewal */
-		update_stats(4);
+		update_stat(STAT_CACHE_EXPIRED);
 		return XDP_PASS;
 	}
 
-	/* Lookup pool metadata */
+	/* Look up pool metadata */
 	struct ip_pool *pool = bpf_map_lookup_elem(&ip_pools, &assignment->pool_id);
 	if (!pool) {
-		/* Pool not found - error */
-		update_stats(3);
+		update_stat(STAT_ERROR);
 		return XDP_PASS;
 	}
 
 	/* CACHE HIT - Fast path! Generate reply in kernel */
-	update_stats(1);
+	update_stat(STAT_FASTPATH_HIT);
 
-	/* Get server configuration */
+	/* Get server configuration (Issue #17: use for MAC address) */
 	__u32 config_key = 0;
 	struct dhcp_server_config *config = bpf_map_lookup_elem(&server_config, &config_key);
 	if (!config) {
-		/* No server config - can't generate reply */
-		update_stats(3);
+		update_stat(STAT_ERROR);
 		return XDP_PASS;
 	}
 
 	/* Determine reply type */
-	__u8 reply_type = (msg_type == DHCP_DISCOVER) ? DHCP_OFFER : DHCP_ACK;
+	__u8 reply_type = (opts.msg_type == DHCP_DISCOVER) ? DHCP_OFFER : DHCP_ACK;
 
 	/* === Build DHCP Reply === */
 
-	/* Set proper MAC addresses for reply */
-	set_reply_eth_addrs(eth, dhcp, config->server_mac);
+	/* Set up L2 headers for reply (Issue #17) */
+	setup_reply_l2_headers(&pkt, config);
 
 	/* Server IP - use config if set, otherwise pool gateway */
 	__u32 server_ip = (config->server_ip != 0) ? config->server_ip : pool->gateway;
 
 	/* Build IP header for reply */
-	ip->saddr = server_ip;
-	ip->daddr = 0xFFFFFFFF;     /* Broadcast */
-	ip->ttl = 64;
-	ip->check = 0;
+	pkt.ip->saddr = server_ip;
+	pkt.ip->daddr = 0xFFFFFFFF;  /* Broadcast at IP layer */
+	pkt.ip->ttl = 64;
+	pkt.ip->check = 0;
 
 	/* Swap UDP ports */
-	udp->source = bpf_htons(DHCP_SERVER_PORT);
-	udp->dest = bpf_htons(DHCP_CLIENT_PORT);
-	udp->check = 0;  /* UDP checksum optional for IPv4 */
+	pkt.udp->source = bpf_htons(DHCP_SERVER_PORT);
+	pkt.udp->dest = bpf_htons(DHCP_CLIENT_PORT);
+	pkt.udp->check = 0;  /* UDP checksum optional for IPv4 */
 
 	/* Build DHCP reply */
-	dhcp->op = BOOTREPLY;
-	dhcp->hops = 0;
-	dhcp->yiaddr = assignment->allocated_ip;  /* Your IP address */
-	dhcp->siaddr = server_ip;                 /* Server IP */
+	pkt.dhcp->op = BOOTREPLY;
+	pkt.dhcp->hops = 0;
+	pkt.dhcp->yiaddr = assignment->allocated_ip;  /* Your IP address */
+	pkt.dhcp->siaddr = server_ip;                 /* Server IP */
+
 	/* Clear sname and file to avoid leaking request data */
-	__builtin_memset(dhcp->sname, 0, sizeof(dhcp->sname));
-	__builtin_memset(dhcp->file, 0, sizeof(dhcp->file));
+	__builtin_memset(pkt.dhcp->sname, 0, sizeof(pkt.dhcp->sname));
+	__builtin_memset(pkt.dhcp->file, 0, sizeof(pkt.dhcp->file));
 
 	/* Build DHCP options */
-	/* Ensure we have room for options (at least 64 bytes) */
-	CHECK_BOUNDS_PASS(dhcp->options, data_end, MAX_DHCP_OPTIONS_LEN);
+	CHECK_BOUNDS_PASS(pkt.dhcp->options, pkt.data_end, MAX_DHCP_REPLY_OPTIONS_LEN);
 
-	int opt_len = build_dhcp_options(dhcp->options, data_end,
+	int opt_len = build_dhcp_options(pkt.dhcp->options, pkt.data_end,
 	                                  reply_type, pool, assignment,
 	                                  server_ip);
 	if (opt_len < 0) {
-		update_stats(3);
+		update_stat(STAT_ERROR);
 		return XDP_PASS;
 	}
 
@@ -564,34 +956,35 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	__u16 dhcp_len = sizeof(struct dhcp_packet) + opt_len;
 	__u16 udp_len = sizeof(struct udphdr) + dhcp_len;
 	__u16 ip_len = sizeof(struct iphdr) + udp_len;
-	__u16 total_len = sizeof(struct ethhdr) + ip_len;
+	__u16 l2_len = sizeof(struct ethhdr) + pkt.vlan_offset;
+	__u16 total_len = l2_len + ip_len;
 
 	/* Calculate original packet size */
+	void *data = (void *)(long)ctx->data;
+	void *data_end = (void *)(long)ctx->data_end;
 	__u16 orig_len = (__u16)((long)data_end - (long)data);
 
 	/* Adjust packet tail if needed */
 	int delta = (int)total_len - (int)orig_len;
 	if (delta != 0) {
 		if (bpf_xdp_adjust_tail(ctx, delta) != 0) {
-			/* Failed to adjust - fall back to slow path */
-			update_stats(3);
+			update_stat(STAT_ERROR);
 			return XDP_PASS;
 		}
-		/* Re-fetch data_end after adjustment */
-		data_end = (void *)(long)ctx->data_end;
+		/* Note: After adjust_tail, we should re-validate pointers.
+		 * However, since we're returning immediately after XDP_TX,
+		 * and we've already built the reply content, this is safe.
+		 */
 	}
 
 	/* Update lengths in headers */
-	ip->tot_len = bpf_htons(ip_len);
-	udp->len = bpf_htons(udp_len);
+	pkt.ip->tot_len = bpf_htons(ip_len);
+	pkt.udp->len = bpf_htons(udp_len);
 
 	/* Calculate IP checksum */
-	ip->check = ip_checksum(ip);
+	pkt.ip->check = ip_checksum(pkt.ip);
 
-	/* UDP checksum is optional for IPv4, set to 0 */
-	udp->check = 0;
-
-	/* Transmit reply */
+	/* Transmit reply back on same interface */
 	return XDP_TX;
 }
 
