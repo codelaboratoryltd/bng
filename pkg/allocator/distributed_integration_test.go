@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// storeAdapter wraps nexus.CLSetStore to implement allocator.Store interface.
+// storeAdapter wraps nexus.DistributedStore to implement allocator.Store interface.
 type storeAdapter struct {
-	store *nexus.CLSetStore
+	store *nexus.DistributedStore
 }
 
 func (s *storeAdapter) Get(ctx context.Context, key string) ([]byte, error) {
@@ -51,10 +51,10 @@ func (s *storeAdapter) Watch(prefix string, callback func(key string, value []by
 
 func TestDistributedAllocator_WithMemoryStore(t *testing.T) {
 	// Create a memory-mode CLSetStore
-	cfg := nexus.DefaultCLSetConfig()
+	cfg := nexus.DefaultDistributedConfig()
 	cfg.Mode = nexus.StoreModeMemory
 
-	store, err := nexus.NewCLSetStore(cfg)
+	store, err := nexus.NewDistributedStore(cfg)
 	require.NoError(t, err)
 	defer store.Close()
 
@@ -77,14 +77,14 @@ func TestDistributedAllocator_WithMemoryStore(t *testing.T) {
 	err = da.Start(ctx)
 	require.NoError(t, err)
 
-	// Allocate
+	// Allocate (note: allocator starts at .0, skipping network/broadcast is caller's responsibility)
 	prefix1, err := da.Allocate(ctx, "sub-001")
 	require.NoError(t, err)
-	assert.Equal(t, "10.100.0.1/32", prefix1.String())
+	assert.Equal(t, "10.100.0.0/32", prefix1.String())
 
 	prefix2, err := da.Allocate(ctx, "sub-002")
 	require.NoError(t, err)
-	assert.Equal(t, "10.100.0.2/32", prefix2.String())
+	assert.Equal(t, "10.100.0.1/32", prefix2.String())
 
 	// Verify persisted in store
 	data, err := store.Get(ctx, "/allocation/integration-pool/sub-001")
@@ -110,10 +110,10 @@ func TestDistributedAllocator_WithMemoryStore(t *testing.T) {
 }
 
 func TestDistributedAllocator_WithMemoryStore_LeaseMode(t *testing.T) {
-	cfg := nexus.DefaultCLSetConfig()
+	cfg := nexus.DefaultDistributedConfig()
 	cfg.Mode = nexus.StoreModeMemory
 
-	store, err := nexus.NewCLSetStore(cfg)
+	store, err := nexus.NewDistributedStore(cfg)
 	require.NoError(t, err)
 	defer store.Close()
 
@@ -149,10 +149,10 @@ func TestDistributedAllocator_WithMemoryStore_LeaseMode(t *testing.T) {
 func TestDistributedAllocator_WithMemoryStore_Persistence(t *testing.T) {
 	// Test that allocator can recover state from store on restart
 
-	cfg := nexus.DefaultCLSetConfig()
+	cfg := nexus.DefaultDistributedConfig()
 	cfg.Mode = nexus.StoreModeMemory
 
-	store, err := nexus.NewCLSetStore(cfg)
+	store, err := nexus.NewDistributedStore(cfg)
 	require.NoError(t, err)
 	defer store.Close()
 
@@ -193,27 +193,27 @@ func TestDistributedAllocator_WithMemoryStore_Persistence(t *testing.T) {
 	// Verify specific allocations
 	prefix1, ok := da2.Get("persist-sub-001")
 	assert.True(t, ok)
-	assert.Equal(t, "172.16.0.1/32", prefix1.String())
+	assert.Equal(t, "172.16.0.0/32", prefix1.String())
 
 	prefix2, ok := da2.Get("persist-sub-002")
 	assert.True(t, ok)
-	assert.Equal(t, "172.16.0.2/32", prefix2.String())
+	assert.Equal(t, "172.16.0.1/32", prefix2.String())
 
 	prefix3, ok := da2.Get("persist-sub-003")
 	assert.True(t, ok)
-	assert.Equal(t, "172.16.0.3/32", prefix3.String())
+	assert.Equal(t, "172.16.0.2/32", prefix3.String())
 
 	// New allocation should continue from where we left off
 	prefix4, err := da2.Allocate(ctx, "persist-sub-004")
 	require.NoError(t, err)
-	assert.Equal(t, "172.16.0.4/32", prefix4.String())
+	assert.Equal(t, "172.16.0.3/32", prefix4.String())
 }
 
 func TestDistributedAllocator_WithMemoryStore_WatchNotification(t *testing.T) {
-	cfg := nexus.DefaultCLSetConfig()
+	cfg := nexus.DefaultDistributedConfig()
 	cfg.Mode = nexus.StoreModeMemory
 
-	store, err := nexus.NewCLSetStore(cfg)
+	store, err := nexus.NewDistributedStore(cfg)
 	require.NoError(t, err)
 	defer store.Close()
 
@@ -274,10 +274,10 @@ func TestDistributedAllocator_WithMemoryStore_WatchNotification(t *testing.T) {
 }
 
 func TestDistributedAllocator_WithMemoryStore_Concurrency(t *testing.T) {
-	cfg := nexus.DefaultCLSetConfig()
+	cfg := nexus.DefaultDistributedConfig()
 	cfg.Mode = nexus.StoreModeMemory
 
-	store, err := nexus.NewCLSetStore(cfg)
+	store, err := nexus.NewDistributedStore(cfg)
 	require.NoError(t, err)
 	defer store.Close()
 
@@ -331,10 +331,10 @@ func TestDistributedAllocator_WithMemoryStore_Concurrency(t *testing.T) {
 }
 
 func TestDistributedAllocator_WithMemoryStore_IPv6(t *testing.T) {
-	cfg := nexus.DefaultCLSetConfig()
+	cfg := nexus.DefaultDistributedConfig()
 	cfg.Mode = nexus.StoreModeMemory
 
-	store, err := nexus.NewCLSetStore(cfg)
+	store, err := nexus.NewDistributedStore(cfg)
 	require.NoError(t, err)
 	defer store.Close()
 

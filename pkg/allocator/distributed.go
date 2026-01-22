@@ -9,15 +9,14 @@ import (
 	"time"
 )
 
-// DistributedAllocator wraps BitmapAllocator with distributed state backing.
+// DistributedAllocator wraps IPAllocator with distributed state backing.
 // Coordinates with other nodes via the Store interface (CLSet or replica).
 type DistributedAllocator struct {
 	mu sync.RWMutex
 
 	// Pool configuration
 	poolID    string
-	config    BitmapConfig
-	allocator *BitmapAllocator
+	allocator *IPAllocator
 
 	// Distributed state
 	store Store
@@ -28,6 +27,13 @@ type DistributedAllocator struct {
 	// Epoch tracking (for lease mode)
 	currentEpoch uint64
 	epochMu      sync.RWMutex
+}
+
+// DistributedStats holds statistics for the distributed allocator.
+type DistributedStats struct {
+	Allocated   int
+	Total       int
+	Utilization float64
 }
 
 // Store is the interface for distributed state (matches nexus.Store).
@@ -83,8 +89,9 @@ Recommendations:
 - WiFi Gateway (lease mode): "write" is REQUIRED
 */
 
-// Allocation represents a stored allocation record.
-type Allocation struct {
+// DistributedAllocation represents a stored allocation record for distributed state.
+// This extends the base DistributedAllocation with epoch tracking for lease mode.
+type DistributedAllocation struct {
 	PoolID       string    `json:"pool_id"`
 	SubscriberID string    `json:"subscriber_id"`
 	Prefix       string    `json:"prefix"` // CIDR notation
@@ -104,19 +111,13 @@ type DistributedConfig struct {
 
 // NewDistributedAllocator creates a new distributed allocator.
 func NewDistributedAllocator(cfg DistributedConfig, store Store) (*DistributedAllocator, error) {
-	bitmapCfg := BitmapConfig{
-		BaseNetwork: cfg.BaseNetwork,
-		PrefixLen:   cfg.PrefixLen,
-	}
-
-	allocator, err := NewBitmapAllocator(bitmapCfg)
+	allocator, err := NewIPAllocator(cfg.BaseNetwork, cfg.PrefixLen)
 	if err != nil {
-		return nil, fmt.Errorf("create bitmap allocator: %w", err)
+		return nil, fmt.Errorf("create IP allocator: %w", err)
 	}
 
 	da := &DistributedAllocator{
 		poolID:    cfg.PoolID,
-		config:    bitmapCfg,
 		allocator: allocator,
 		store:     store,
 		mode:      cfg.Mode,
@@ -155,7 +156,7 @@ func (da *DistributedAllocator) Allocate(ctx context.Context, subscriberID strin
 	}
 
 	// Persist to distributed store
-	alloc := &Allocation{
+	alloc := &DistributedAllocation{
 		PoolID:       da.poolID,
 		SubscriberID: subscriberID,
 		Prefix:       prefix.String(),
@@ -182,7 +183,7 @@ func (da *DistributedAllocator) AllocateWithMAC(ctx context.Context, subscriberI
 		return nil, err
 	}
 
-	alloc := &Allocation{
+	alloc := &DistributedAllocation{
 		PoolID:       da.poolID,
 		SubscriberID: subscriberID,
 		Prefix:       prefix.String(),
@@ -236,21 +237,28 @@ func (da *DistributedAllocator) Release(ctx context.Context, subscriberID string
 func (da *DistributedAllocator) Get(subscriberID string) (*net.IPNet, bool) {
 	da.mu.RLock()
 	defer da.mu.RUnlock()
-	return da.allocator.Get(subscriberID)
+	prefix := da.allocator.Lookup(subscriberID)
+	return prefix, prefix != nil
 }
 
 // GetByPrefix returns the subscriber for a given prefix.
 func (da *DistributedAllocator) GetByPrefix(prefix *net.IPNet) (string, bool) {
 	da.mu.RLock()
 	defer da.mu.RUnlock()
-	return da.allocator.GetByPrefix(prefix)
+	subID := da.allocator.LookupByPrefix(prefix)
+	return subID, subID != ""
 }
 
 // Stats returns allocator statistics.
-func (da *DistributedAllocator) Stats() BitmapStats {
+func (da *DistributedAllocator) Stats() DistributedStats {
 	da.mu.RLock()
 	defer da.mu.RUnlock()
-	return da.allocator.Stats()
+	allocated, total, utilization := da.allocator.Stats()
+	return DistributedStats{
+		Allocated:   int(allocated),
+		Total:       int(total),
+		Utilization: utilization,
+	}
 }
 
 // --- Epoch management (lease mode) ---
@@ -299,7 +307,7 @@ func (da *DistributedAllocator) reclaimExpired(ctx context.Context) {
 	}
 
 	for _, kv := range results {
-		var alloc Allocation
+		var alloc DistributedAllocation
 		if err := json.Unmarshal(kv.Value, &alloc); err != nil {
 			continue
 		}
@@ -321,7 +329,7 @@ func (da *DistributedAllocator) allocationKey(subscriberID string) string {
 	return fmt.Sprintf("/allocation/%s/%s", da.poolID, subscriberID)
 }
 
-func (da *DistributedAllocator) saveAllocation(ctx context.Context, alloc *Allocation) error {
+func (da *DistributedAllocator) saveAllocation(ctx context.Context, alloc *DistributedAllocation) error {
 	data, err := json.Marshal(alloc)
 	if err != nil {
 		return err
@@ -329,13 +337,13 @@ func (da *DistributedAllocator) saveAllocation(ctx context.Context, alloc *Alloc
 	return da.store.Put(ctx, da.allocationKey(alloc.SubscriberID), data)
 }
 
-func (da *DistributedAllocator) getAllocation(ctx context.Context, subscriberID string) (*Allocation, error) {
+func (da *DistributedAllocator) getAllocation(ctx context.Context, subscriberID string) (*DistributedAllocation, error) {
 	data, err := da.store.Get(ctx, da.allocationKey(subscriberID))
 	if err != nil {
 		return nil, err
 	}
 
-	var alloc Allocation
+	var alloc DistributedAllocation
 	if err := json.Unmarshal(data, &alloc); err != nil {
 		return nil, err
 	}
@@ -353,7 +361,7 @@ func (da *DistributedAllocator) loadAllocations(ctx context.Context) error {
 	}
 
 	for _, kv := range results {
-		var alloc Allocation
+		var alloc DistributedAllocation
 		if err := json.Unmarshal(kv.Value, &alloc); err != nil {
 			continue
 		}
@@ -387,7 +395,7 @@ func (da *DistributedAllocator) handleRemoteChange(key string, value []byte, del
 		return
 	}
 
-	var alloc Allocation
+	var alloc DistributedAllocation
 	if err := json.Unmarshal(value, &alloc); err != nil {
 		return
 	}
@@ -399,7 +407,7 @@ func (da *DistributedAllocator) handleRemoteChange(key string, value []byte, del
 	}
 
 	// Check if we already have this allocation
-	if existing, ok := da.allocator.Get(alloc.SubscriberID); ok {
+	if existing := da.allocator.Lookup(alloc.SubscriberID); existing != nil {
 		if existing.String() == prefix.String() {
 			return // Already in sync
 		}

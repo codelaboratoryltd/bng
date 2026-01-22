@@ -42,8 +42,9 @@ const (
 // ErrReadOnlyNode is returned when a write operation is attempted on a read-only node.
 var ErrReadOnlyNode = fmt.Errorf("operation not allowed on read-only node")
 
-// CLSetConfig configures the distributed store.
-type CLSetConfig struct {
+// DistributedConfig configures the distributed store with CRDT modes.
+// This is the new design supporting memory/read/write modes.
+type DistributedConfig struct {
 	// Mode determines participation level: "memory", "read", or "write"
 	Mode StoreMode
 
@@ -70,9 +71,9 @@ type CLSetConfig struct {
 	RebroadcastInterval time.Duration
 }
 
-// DefaultCLSetConfig returns sensible defaults.
-func DefaultCLSetConfig() CLSetConfig {
-	return CLSetConfig{
+// DefaultDistributedConfig returns sensible defaults.
+func DefaultDistributedConfig() DistributedConfig {
+	return DistributedConfig{
 		Mode:                StoreModeMemory,
 		NodeName:            "BNG",
 		Topic:               "bng-state",
@@ -80,15 +81,15 @@ func DefaultCLSetConfig() CLSetConfig {
 	}
 }
 
-// CLSetStore implements Store with distributed state support.
+// DistributedStore implements Store with distributed state support.
 // Supports three modes: memory (local), read (gossip, no hashring), write (gossip + hashring).
 //
 // Architecture matches nexus/internal/state:
 // - All non-memory modes use libp2p gossip for CRDT sync
 // - "read" nodes receive updates but return ErrReadOnlyNode on writes
 // - "write" nodes join the hashring and can allocate locally
-type CLSetStore struct {
-	config CLSetConfig
+type DistributedStore struct {
+	config DistributedConfig
 	mode   StoreMode
 
 	// Local cache (used by memory mode only)
@@ -149,11 +150,11 @@ type ClusterMember struct {
 	Metadata   map[string]string // Arbitrary metadata (name, version, etc.)
 }
 
-// NewCLSetStore creates a new distributed store.
-func NewCLSetStore(config CLSetConfig) (*CLSetStore, error) {
+// NewDistributedStore creates a new distributed store.
+func NewDistributedStore(config DistributedConfig) (*DistributedStore, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	s := &CLSetStore{
+	s := &DistributedStore{
 		config:   config,
 		mode:     config.Mode,
 		cache:    make(map[string]cacheEntry),
@@ -185,7 +186,7 @@ func NewCLSetStore(config CLSetConfig) (*CLSetStore, error) {
 }
 
 // Get retrieves a value by key.
-func (s *CLSetStore) Get(ctx context.Context, key string) ([]byte, error) {
+func (s *DistributedStore) Get(ctx context.Context, key string) ([]byte, error) {
 	switch s.mode {
 	case StoreModeMemory:
 		s.mu.RLock()
@@ -205,7 +206,7 @@ func (s *CLSetStore) Get(ctx context.Context, key string) ([]byte, error) {
 }
 
 // Put stores a value at the given key.
-func (s *CLSetStore) Put(ctx context.Context, key string, value []byte) error {
+func (s *DistributedStore) Put(ctx context.Context, key string, value []byte) error {
 	switch s.mode {
 	case StoreModeMemory:
 		s.mu.Lock()
@@ -231,7 +232,7 @@ func (s *CLSetStore) Put(ctx context.Context, key string, value []byte) error {
 }
 
 // Delete removes a value at the given key.
-func (s *CLSetStore) Delete(ctx context.Context, key string) error {
+func (s *DistributedStore) Delete(ctx context.Context, key string) error {
 	switch s.mode {
 	case StoreModeMemory:
 		s.mu.Lock()
@@ -253,7 +254,7 @@ func (s *CLSetStore) Delete(ctx context.Context, key string) error {
 }
 
 // Query returns all key-value pairs matching the prefix.
-func (s *CLSetStore) Query(ctx context.Context, prefix string) ([]KeyValue, error) {
+func (s *DistributedStore) Query(ctx context.Context, prefix string) ([]KeyValue, error) {
 	switch s.mode {
 	case StoreModeMemory:
 		s.mu.RLock()
@@ -275,7 +276,7 @@ func (s *CLSetStore) Query(ctx context.Context, prefix string) ([]KeyValue, erro
 }
 
 // Watch registers a callback for changes matching the prefix.
-func (s *CLSetStore) Watch(prefix string, callback WatchCallback) {
+func (s *DistributedStore) Watch(prefix string, callback WatchCallback) {
 	s.watchersMu.Lock()
 	s.watchers[prefix] = append(s.watchers[prefix], callback)
 	s.watchersMu.Unlock()
@@ -288,7 +289,7 @@ func (s *CLSetStore) Watch(prefix string, callback WatchCallback) {
 }
 
 // Close shuts down the store.
-func (s *CLSetStore) Close() error {
+func (s *DistributedStore) Close() error {
 	s.cancel()
 
 	switch s.mode {
@@ -302,7 +303,7 @@ func (s *CLSetStore) Close() error {
 }
 
 // Members returns current cluster members.
-func (s *CLSetStore) Members() []ClusterMember {
+func (s *DistributedStore) Members() []ClusterMember {
 	if s.crdt != nil {
 		return s.crdt.Members()
 	}
@@ -310,17 +311,17 @@ func (s *CLSetStore) Members() []ClusterMember {
 }
 
 // IsWriteNode returns true if this node can perform writes.
-func (s *CLSetStore) IsWriteNode() bool {
+func (s *DistributedStore) IsWriteNode() bool {
 	return s.mode == StoreModeWrite
 }
 
 // Mode returns the current store mode.
-func (s *CLSetStore) Mode() StoreMode {
+func (s *DistributedStore) Mode() StoreMode {
 	return s.mode
 }
 
 // notifyWatchers calls all matching watchers (used by memory mode).
-func (s *CLSetStore) notifyWatchers(key string, value []byte, deleted bool) {
+func (s *DistributedStore) notifyWatchers(key string, value []byte, deleted bool) {
 	s.watchersMu.RLock()
 	defer s.watchersMu.RUnlock()
 

@@ -30,7 +30,7 @@ const (
 
 // clsetBackendImpl implements crdtBackend using CLSet + libp2p.
 type clsetBackendImpl struct {
-	config CLSetConfig
+	config DistributedConfig
 
 	// libp2p host
 	host host.Host
@@ -57,7 +57,7 @@ type clsetBackendImpl struct {
 }
 
 // newCRDTBackend creates a CLSet backend using libp2p gossip.
-func newCRDTBackend(config CLSetConfig) (crdtBackend, error) {
+func newCRDTBackend(config DistributedConfig) (crdtBackend, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	impl := &clsetBackendImpl{

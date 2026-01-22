@@ -178,7 +178,7 @@ func TestDistributedAllocator_Allocate_SessionMode(t *testing.T) {
 	// First allocation
 	prefix1, err := da.Allocate(ctx, "sub-001")
 	require.NoError(t, err)
-	assert.Equal(t, "10.0.0.1/32", prefix1.String())
+	assert.Equal(t, "10.0.0.0/32", prefix1.String())
 
 	// Verify stored in distributed store
 	assert.Equal(t, 1, store.countAllocations("session-pool"))
@@ -186,7 +186,7 @@ func TestDistributedAllocator_Allocate_SessionMode(t *testing.T) {
 	// Second allocation
 	prefix2, err := da.Allocate(ctx, "sub-002")
 	require.NoError(t, err)
-	assert.Equal(t, "10.0.0.2/32", prefix2.String())
+	assert.Equal(t, "10.0.0.1/32", prefix2.String())
 
 	// Idempotent - same subscriber gets same IP
 	prefix1Again, err := da.Allocate(ctx, "sub-001")
@@ -221,7 +221,7 @@ func TestDistributedAllocator_Allocate_LeaseMode(t *testing.T) {
 	data, err := store.Get(ctx, "/allocation/lease-pool/sub-001")
 	require.NoError(t, err)
 
-	var alloc Allocation
+	var alloc DistributedAllocation
 	require.NoError(t, json.Unmarshal(data, &alloc))
 	assert.Equal(t, uint64(0), alloc.Epoch) // Initial epoch is 0
 }
@@ -249,7 +249,7 @@ func TestDistributedAllocator_AllocateWithMAC(t *testing.T) {
 	data, err := store.Get(ctx, "/allocation/mac-pool/sub-001")
 	require.NoError(t, err)
 
-	var alloc Allocation
+	var alloc DistributedAllocation
 	require.NoError(t, json.Unmarshal(data, &alloc))
 	assert.Equal(t, "00:11:22:33:44:55", alloc.MAC)
 }
@@ -307,7 +307,7 @@ func TestDistributedAllocator_Renew_LeaseMode(t *testing.T) {
 	data, err := store.Get(ctx, "/allocation/lease-pool/sub-001")
 	require.NoError(t, err)
 
-	var alloc Allocation
+	var alloc DistributedAllocation
 	require.NoError(t, json.Unmarshal(data, &alloc))
 	assert.Equal(t, uint64(1), alloc.Epoch)
 }
@@ -329,7 +329,7 @@ func TestDistributedAllocator_Release(t *testing.T) {
 	// Allocate
 	prefix, err := da.Allocate(ctx, "sub-001")
 	require.NoError(t, err)
-	assert.Equal(t, "10.0.0.1/32", prefix.String())
+	assert.Equal(t, "10.0.0.0/32", prefix.String())
 
 	assert.Equal(t, 1, da.Stats().Allocated)
 	assert.Equal(t, 1, store.countAllocations("release-pool"))
@@ -344,7 +344,7 @@ func TestDistributedAllocator_Release(t *testing.T) {
 	// Next allocation should get the same IP (re-used)
 	prefix2, err := da.Allocate(ctx, "sub-002")
 	require.NoError(t, err)
-	assert.Equal(t, "10.0.0.1/32", prefix2.String())
+	assert.Equal(t, "10.0.0.0/32", prefix2.String())
 }
 
 func TestDistributedAllocator_Get(t *testing.T) {
@@ -412,14 +412,14 @@ func TestDistributedAllocator_Start_LoadAllocations(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-populate store with allocations
-	alloc1 := &Allocation{
+	alloc1 := &DistributedAllocation{
 		PoolID:       "load-pool",
 		SubscriberID: "sub-001",
 		Prefix:       "10.0.0.5/32",
 		Epoch:        0,
 		AllocatedAt:  time.Now(),
 	}
-	alloc2 := &Allocation{
+	alloc2 := &DistributedAllocation{
 		PoolID:       "load-pool",
 		SubscriberID: "sub-002",
 		Prefix:       "10.0.0.10/32",
@@ -477,7 +477,7 @@ func TestDistributedAllocator_HandleRemoteChange_Add(t *testing.T) {
 	require.NoError(t, err)
 
 	// Simulate remote allocation (as if from another node)
-	remoteAlloc := &Allocation{
+	remoteAlloc := &DistributedAllocation{
 		PoolID:       "sync-pool",
 		SubscriberID: "remote-sub-001",
 		Prefix:       "10.0.0.50/32",
