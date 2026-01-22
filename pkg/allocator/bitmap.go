@@ -514,3 +514,42 @@ func ipOffset(base, target net.IP) *big.Int {
 
 	return new(big.Int).Sub(targetInt, baseInt)
 }
+
+// SetAllocation forcibly sets an allocation (for replaying from distributed store).
+// This is used during startup to restore state from the authoritative store.
+func (a *BitmapAllocator) SetAllocation(subscriberID string, prefix *net.IPNet) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	idx := a.prefixToIndex(prefix)
+	if idx < 0 || idx >= a.totalBits {
+		return fmt.Errorf("prefix %s out of range for pool", prefix)
+	}
+
+	// Check if already allocated to someone else
+	if existing, exists := a.byIndex[idx]; exists && existing != subscriberID {
+		return fmt.Errorf("prefix %s already allocated to %s", prefix, existing)
+	}
+
+	// Clear any existing allocation for this subscriber
+	if oldIdx, exists := a.allocations[subscriberID]; exists {
+		if oldIdx != idx {
+			a.bitmap.SetBit(a.bitmap, oldIdx, 0)
+			delete(a.byIndex, oldIdx)
+			a.allocated--
+		}
+	}
+
+	// Set new allocation
+	a.bitmap.SetBit(a.bitmap, idx, 1)
+	a.allocations[subscriberID] = idx
+	a.byIndex[idx] = subscriberID
+	a.allocated++
+
+	return nil
+}
+
+// PrefixToIndex converts a prefix to its bit index (exposed for distributed allocator).
+func (a *BitmapAllocator) PrefixToIndex(prefix *net.IPNet) int {
+	return a.prefixToIndex(prefix)
+}
