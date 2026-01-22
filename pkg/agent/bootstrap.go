@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 	"github.com/codelaboratoryltd/bng/pkg/ztp"
 )
 
@@ -37,6 +38,9 @@ type BootstrapConfig struct {
 
 	// MaxRetries is the maximum number of registration attempts (0 = infinite).
 	MaxRetries int `yaml:"max_retries"`
+
+	// Auth contains device authentication configuration.
+	Auth deviceauth.Config `yaml:"auth"`
 }
 
 // DefaultBootstrapConfig returns sensible defaults.
@@ -45,14 +49,16 @@ func DefaultBootstrapConfig() BootstrapConfig {
 		ZTPInterface:  "eth0",
 		RetryInterval: 30 * time.Second,
 		MaxRetries:    0, // Infinite retries
+		Auth:          deviceauth.DefaultConfig(),
 	}
 }
 
 // Bootstrap handles the initial device registration process.
 type Bootstrap struct {
-	config BootstrapConfig
-	logger *zap.Logger
-	client *http.Client
+	config        BootstrapConfig
+	logger        *zap.Logger
+	client        *http.Client
+	authenticator deviceauth.Authenticator
 }
 
 // NewBootstrap creates a new Bootstrap instance.
@@ -64,6 +70,80 @@ func NewBootstrap(config BootstrapConfig, logger *zap.Logger) *Bootstrap {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// NewBootstrapWithAuth creates a new Bootstrap instance with device authentication.
+func NewBootstrapWithAuth(config BootstrapConfig, logger *zap.Logger) (*Bootstrap, error) {
+	b := &Bootstrap{
+		config: config,
+		logger: logger,
+	}
+
+	// Initialize authenticator based on config
+	if config.Auth.Mode != deviceauth.AuthModeNone {
+		// Validate auth config
+		if err := deviceauth.ValidateConfig(config.Auth); err != nil {
+			return nil, fmt.Errorf("invalid auth config: %w", err)
+		}
+
+		// Get device info for authenticator options
+		info, err := b.GetDeviceInfo()
+		if err != nil {
+			logger.Warn("Failed to get device info for auth", zap.Error(err))
+		}
+
+		opts := []deviceauth.AuthenticatorOption{}
+		if info != nil {
+			opts = append(opts, deviceauth.WithSerial(info.Serial))
+			opts = append(opts, deviceauth.WithMAC(info.MAC))
+		}
+
+		// Create authenticator
+		auth, err := deviceauth.NewAuthenticator(config.Auth, logger, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create authenticator: %w", err)
+		}
+		b.authenticator = auth
+
+		// Configure HTTP client with TLS
+		tlsConfig := auth.GetTLSConfig()
+		if tlsConfig != nil {
+			b.client = &http.Client{
+				Timeout: 30 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: tlsConfig,
+				},
+			}
+		} else {
+			b.client = &http.Client{
+				Timeout: 30 * time.Second,
+			}
+		}
+
+		logger.Info("Device authentication initialized",
+			zap.String("mode", string(auth.Mode())),
+			zap.String("device_id", auth.Identity().DeviceID),
+		)
+	} else {
+		b.client = &http.Client{
+			Timeout: 30 * time.Second,
+		}
+	}
+
+	return b, nil
+}
+
+// Authenticator returns the device authenticator (if any).
+func (b *Bootstrap) Authenticator() deviceauth.Authenticator {
+	return b.authenticator
+}
+
+// Close releases resources held by the bootstrap instance.
+func (b *Bootstrap) Close() error {
+	if b.authenticator != nil {
+		return b.authenticator.Close()
+	}
+	return nil
 }
 
 // GetDeviceInfo reads hardware information from the system.
@@ -355,6 +435,26 @@ func (b *Bootstrap) sendRegistration(ctx context.Context, req *RegistrationReque
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", "olt-bng/"+Version)
 
+	// Add authentication headers if authenticator is configured
+	if b.authenticator != nil {
+		// Perform authentication check
+		authResult, err := b.authenticator.Authenticate()
+		if err != nil {
+			return nil, fmt.Errorf("device authentication failed: %w", err)
+		}
+		if !authResult.Success {
+			return nil, fmt.Errorf("device authentication failed: %s", authResult.Error)
+		}
+
+		// Add authentication headers
+		for key, value := range b.authenticator.GetHTTPHeaders() {
+			httpReq.Header.Set(key, value)
+		}
+
+		// Add auth mode header for server to know how to verify
+		httpReq.Header.Set("X-Auth-Mode", string(b.authenticator.Mode()))
+	}
+
 	resp, err := b.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -364,6 +464,14 @@ func (b *Bootstrap) sendRegistration(ctx context.Context, req *RegistrationReque
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("authentication rejected by server: %s", string(respBody))
+	}
+
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("device not authorized: %s", string(respBody))
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {

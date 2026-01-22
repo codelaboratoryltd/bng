@@ -3,10 +3,13 @@ package nexus
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 )
 
 // ClientConfig contains configuration for the Nexus client.
@@ -22,6 +25,14 @@ type ClientConfig struct {
 
 	// SyncInterval is how often to sync state.
 	SyncInterval time.Duration
+
+	// Auth contains device authentication configuration.
+	// If set, the client will use authenticated transport for API calls.
+	Auth *deviceauth.Config
+
+	// Authenticator is an optional pre-configured authenticator.
+	// If set, this takes precedence over Auth config.
+	Authenticator deviceauth.Authenticator
 }
 
 // DefaultClientConfig returns sensible defaults.
@@ -56,6 +67,10 @@ type Client struct {
 	onNTEChange        func(id string, nte *NTE, deleted bool)
 	onISPChange        func(id string, isp *ISPConfig, deleted bool)
 
+	// HTTP client for API calls (with authentication if configured)
+	httpClient    *http.Client
+	authenticator deviceauth.Authenticator
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -74,6 +89,7 @@ func NewClient(config ClientConfig, store Store, logger *zap.Logger) *Client {
 		ispCache:        make(map[string]*ISPConfig),
 		ctx:             ctx,
 		cancel:          cancel,
+		httpClient:      &http.Client{Timeout: 30 * time.Second},
 	}
 
 	// Create typed stores with appropriate prefixes
@@ -83,7 +99,46 @@ func NewClient(config ClientConfig, store Store, logger *zap.Logger) *Client {
 	c.Pools = NewTypedStore[IPPool](store, "/pool")
 	c.Devices = NewTypedStore[Device](store, "/device")
 
+	// Set up authenticator if provided directly
+	if config.Authenticator != nil {
+		c.authenticator = config.Authenticator
+		c.httpClient = deviceauth.NewAuthenticatedClient(c.authenticator)
+		logger.Info("Nexus client using pre-configured authenticator",
+			zap.String("mode", string(c.authenticator.Mode())),
+		)
+	} else if config.Auth != nil && config.Auth.Mode != deviceauth.AuthModeNone {
+		// Create authenticator from config
+		auth, err := deviceauth.NewAuthenticator(*config.Auth, logger)
+		if err != nil {
+			logger.Error("Failed to create authenticator, continuing without auth",
+				zap.Error(err),
+			)
+		} else {
+			c.authenticator = auth
+			c.httpClient = deviceauth.NewAuthenticatedClient(auth)
+			logger.Info("Nexus client authentication initialized",
+				zap.String("mode", string(auth.Mode())),
+			)
+		}
+	}
+
 	return c
+}
+
+// NewClientWithAuth creates a new Nexus client with a pre-configured authenticator.
+func NewClientWithAuth(config ClientConfig, store Store, auth deviceauth.Authenticator, logger *zap.Logger) *Client {
+	config.Authenticator = auth
+	return NewClient(config, store, logger)
+}
+
+// Authenticator returns the client's authenticator (if any).
+func (c *Client) Authenticator() deviceauth.Authenticator {
+	return c.authenticator
+}
+
+// HTTPClient returns the HTTP client (with authentication if configured).
+func (c *Client) HTTPClient() *http.Client {
+	return c.httpClient
 }
 
 // Start begins the client's background operations.
@@ -113,6 +168,14 @@ func (c *Client) Stop() error {
 	c.logger.Info("Stopping Nexus client")
 	c.cancel()
 	c.wg.Wait()
+
+	// Close authenticator if we own it
+	if c.authenticator != nil && c.config.Auth != nil {
+		if err := c.authenticator.Close(); err != nil {
+			c.logger.Warn("Failed to close authenticator", zap.Error(err))
+		}
+	}
+
 	return c.store.Close()
 }
 
