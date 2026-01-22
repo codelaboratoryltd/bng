@@ -13,6 +13,7 @@ require (
 	github.com/vishvananda/netlink v1.3.1
 	go.uber.org/zap v1.26.0
 	golang.org/x/net v0.48.0
+	golang.org/x/time v0.14.0
 	layeh.com/radius v0.0.0-20231213012653-1006025d24f8
 )
 
