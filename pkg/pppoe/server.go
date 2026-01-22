@@ -316,7 +316,13 @@ func (s *Server) handlePADI(clientMAC net.HardwareAddr, tags []Tag) {
 
 	// Generate AC-Cookie
 	cookie := make([]byte, 16)
-	rand.Read(cookie)
+	if _, err := rand.Read(cookie); err != nil {
+		s.logger.Error("Failed to generate AC-Cookie",
+			zap.String("client_mac", clientMAC.String()),
+			zap.Error(err),
+		)
+		return
+	}
 
 	// Build PADO response
 	responseTags := []Tag{
@@ -356,7 +362,14 @@ func (s *Server) handlePADR(clientMAC net.HardwareAddr, tags []Tag) {
 	}
 
 	// Create session
-	session := s.sessions.CreateSession(clientMAC, s.serverMAC)
+	session, err := s.sessions.CreateSession(clientMAC, s.serverMAC)
+	if err != nil {
+		s.logger.Error("Failed to create session",
+			zap.String("client_mac", clientMAC.String()),
+			zap.Error(err),
+		)
+		return
+	}
 	session.HostUniq = hostUniq
 
 	if sn := FindTag(tags, TagServiceName); sn != nil {
@@ -604,7 +617,9 @@ func (s *Server) handlePAP(session *Session, data []byte) {
 
 	if s.radiusClient != nil {
 		var err error
-		authResp, err = s.radiusClient.Authenticate(context.Background(), &radius.AuthRequest{
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		authResp, err = s.radiusClient.Authenticate(ctx, &radius.AuthRequest{
 			Username: username,
 			Password: password,
 			MAC:      session.ClientMAC,

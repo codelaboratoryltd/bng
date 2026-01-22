@@ -42,7 +42,9 @@ var _ = Describe("PPPoE Session", func() {
 		BeforeEach(func() {
 			clientMAC, _ = net.ParseMAC("aa:bb:cc:dd:ee:ff")
 			serverMAC, _ = net.ParseMAC("11:22:33:44:55:66")
-			session = pppoe.NewSession(1, clientMAC, serverMAC)
+			var err error
+			session, err = pppoe.NewSession(1, clientMAC, serverMAC)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		Context("when creating a new session", func() {
@@ -58,7 +60,8 @@ var _ = Describe("PPPoE Session", func() {
 			})
 
 			It("should generate unique magic numbers", func() {
-				session2 := pppoe.NewSession(2, clientMAC, serverMAC)
+				session2, err := pppoe.NewSession(2, clientMAC, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				// Magic numbers should be different (random)
 				// Note: There's a tiny chance they could be equal
 				Expect(session.MagicNumber).NotTo(Equal(session2.MagicNumber))
@@ -167,8 +170,8 @@ var _ = Describe("PPPoE Session", func() {
 
 		Context("when creating sessions", func() {
 			It("should create a session with unique ID", func() {
-				session := manager.CreateSession(clientMAC, serverMAC)
-
+				session, err := manager.CreateSession(clientMAC, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				Expect(session).NotTo(BeNil())
 				Expect(session.ID).To(Equal(uint16(1)))
 				Expect(session.ClientMAC.String()).To(Equal(clientMAC.String()))
@@ -179,9 +182,12 @@ var _ = Describe("PPPoE Session", func() {
 				mac2, _ := net.ParseMAC("aa:bb:cc:dd:ee:02")
 				mac3, _ := net.ParseMAC("aa:bb:cc:dd:ee:03")
 
-				s1 := manager.CreateSession(mac1, serverMAC)
-				s2 := manager.CreateSession(mac2, serverMAC)
-				s3 := manager.CreateSession(mac3, serverMAC)
+				s1, err := manager.CreateSession(mac1, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
+				s2, err := manager.CreateSession(mac2, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
+				s3, err := manager.CreateSession(mac3, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 
 				Expect(s1.ID).To(Equal(uint16(1)))
 				Expect(s2.ID).To(Equal(uint16(2)))
@@ -192,7 +198,8 @@ var _ = Describe("PPPoE Session", func() {
 				// Create many sessions to potentially wrap around
 				for i := 0; i < 10; i++ {
 					mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:" + string(rune('a'+i)))
-					session := manager.CreateSession(mac, serverMAC)
+					session, err := manager.CreateSession(mac, serverMAC)
+					Expect(err).NotTo(HaveOccurred())
 					Expect(session.ID).NotTo(BeZero())
 				}
 			})
@@ -200,7 +207,8 @@ var _ = Describe("PPPoE Session", func() {
 
 		Context("when getting sessions", func() {
 			It("should return session by ID", func() {
-				created := manager.CreateSession(clientMAC, serverMAC)
+				created, err := manager.CreateSession(clientMAC, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				found := manager.GetSession(created.ID)
 
 				Expect(found).NotTo(BeNil())
@@ -213,7 +221,8 @@ var _ = Describe("PPPoE Session", func() {
 			})
 
 			It("should return session by MAC", func() {
-				created := manager.CreateSession(clientMAC, serverMAC)
+				created, err := manager.CreateSession(clientMAC, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				found := manager.GetSessionByMAC(clientMAC)
 
 				Expect(found).NotTo(BeNil())
@@ -229,7 +238,8 @@ var _ = Describe("PPPoE Session", func() {
 
 		Context("when removing sessions", func() {
 			It("should remove session by ID", func() {
-				session := manager.CreateSession(clientMAC, serverMAC)
+				session, err := manager.CreateSession(clientMAC, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				Expect(manager.Count()).To(Equal(1))
 
 				manager.RemoveSession(session.ID)
@@ -256,8 +266,10 @@ var _ = Describe("PPPoE Session", func() {
 				mac1, _ := net.ParseMAC("aa:bb:cc:dd:ee:01")
 				mac2, _ := net.ParseMAC("aa:bb:cc:dd:ee:02")
 
-				manager.CreateSession(mac1, serverMAC)
-				manager.CreateSession(mac2, serverMAC)
+				_, err := manager.CreateSession(mac1, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
+				_, err = manager.CreateSession(mac2, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 
 				sessions := manager.GetAllSessions()
 				Expect(sessions).To(HaveLen(2))
@@ -273,8 +285,10 @@ var _ = Describe("PPPoE Session", func() {
 				mac1, _ := net.ParseMAC("aa:bb:cc:dd:ee:01")
 				mac2, _ := net.ParseMAC("aa:bb:cc:dd:ee:02")
 
-				manager.CreateSession(mac1, serverMAC)
-				manager.CreateSession(mac2, serverMAC)
+				_, err := manager.CreateSession(mac1, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
+				_, err = manager.CreateSession(mac2, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 
 				Expect(manager.Count()).To(Equal(2))
 			})
@@ -282,7 +296,8 @@ var _ = Describe("PPPoE Session", func() {
 
 		Context("when cleaning up expired sessions", func() {
 			It("should remove inactive sessions", func() {
-				session := manager.CreateSession(clientMAC, serverMAC)
+				session, err := manager.CreateSession(clientMAC, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				session.LastActivity = time.Now().Add(-10 * time.Minute)
 
 				removed := manager.CleanupExpired(5 * time.Minute)
@@ -292,7 +307,8 @@ var _ = Describe("PPPoE Session", func() {
 			})
 
 			It("should not remove active sessions", func() {
-				session := manager.CreateSession(clientMAC, serverMAC)
+				session, err := manager.CreateSession(clientMAC, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				session.UpdateActivity()
 
 				removed := manager.CleanupExpired(5 * time.Minute)
@@ -305,10 +321,12 @@ var _ = Describe("PPPoE Session", func() {
 				mac1, _ := net.ParseMAC("aa:bb:cc:dd:ee:01")
 				mac2, _ := net.ParseMAC("aa:bb:cc:dd:ee:02")
 
-				active := manager.CreateSession(mac1, serverMAC)
+				active, err := manager.CreateSession(mac1, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				active.UpdateActivity()
 
-				expired := manager.CreateSession(mac2, serverMAC)
+				expired, err := manager.CreateSession(mac2, serverMAC)
+				Expect(err).NotTo(HaveOccurred())
 				expired.LastActivity = time.Now().Add(-10 * time.Minute)
 
 				removed := manager.CleanupExpired(5 * time.Minute)

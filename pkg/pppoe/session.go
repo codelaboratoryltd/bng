@@ -3,6 +3,7 @@ package pppoe
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -90,16 +91,20 @@ type Session struct {
 }
 
 // NewSession creates a new PPPoE session
-func NewSession(id uint16, clientMAC, serverMAC net.HardwareAddr) *Session {
+func NewSession(id uint16, clientMAC, serverMAC net.HardwareAddr) (*Session, error) {
 	// Generate magic number
 	magicBytes := make([]byte, 4)
-	rand.Read(magicBytes)
+	if _, err := rand.Read(magicBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate magic number: %w", err)
+	}
 	magic := uint32(magicBytes[0])<<24 | uint32(magicBytes[1])<<16 |
 		uint32(magicBytes[2])<<8 | uint32(magicBytes[3])
 
 	// Generate session ID
 	sidBytes := make([]byte, 8)
-	rand.Read(sidBytes)
+	if _, err := rand.Read(sidBytes); err != nil {
+		return nil, fmt.Errorf("failed to generate session ID: %w", err)
+	}
 
 	return &Session{
 		ID:           id,
@@ -111,7 +116,7 @@ func NewSession(id uint16, clientMAC, serverMAC net.HardwareAddr) *Session {
 		CreatedAt:    time.Now(),
 		LastActivity: time.Now(),
 		SessionID:    hex.EncodeToString(sidBytes),
-	}
+	}, nil
 }
 
 // UpdateActivity updates the last activity timestamp
@@ -191,7 +196,7 @@ func NewSessionManager() *SessionManager {
 }
 
 // CreateSession creates a new session
-func (m *SessionManager) CreateSession(clientMAC, serverMAC net.HardwareAddr) *Session {
+func (m *SessionManager) CreateSession(clientMAC, serverMAC net.HardwareAddr) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -206,12 +211,15 @@ func (m *SessionManager) CreateSession(clientMAC, serverMAC net.HardwareAddr) *S
 		}
 	}
 
-	session := NewSession(m.nextID, clientMAC, serverMAC)
+	session, err := NewSession(m.nextID, clientMAC, serverMAC)
+	if err != nil {
+		return nil, err
+	}
 	m.sessions[m.nextID] = session
 	m.macToSession[clientMAC.String()] = m.nextID
 	m.nextID++
 
-	return session
+	return session, nil
 }
 
 // GetSession returns a session by ID
