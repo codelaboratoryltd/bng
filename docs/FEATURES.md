@@ -463,33 +463,41 @@ bng:
 
 ---
 
-## Feature Priority for POC
+## Feature Status (v0.2.0)
 
-### Phase 1 (Critical):
+### Core Features (Complete):
 - ✅ DHCP Fast Path (eBPF/XDP)
 - ✅ DHCP Slow Path (Go userspace)
 - ✅ IP Pool Management
-- ✅ Basic Session Tracking
+- ✅ Session Tracking
 - ✅ Prometheus Metrics
 - ✅ Hubble Observability
 
-### Phase 2 (Important):
-- ⏸ RADIUS Authentication
-- ⏸ QoS Rate Limiting
-- ⏸ NAT44 (Basic CGNAT)
-- ⏸ Logging/Auditing
+### Authentication & Accounting (Complete):
+- ✅ RADIUS Authentication
+- ✅ RADIUS Hardening (Interim updates, CoA)
+- ✅ Device Authentication (mTLS, PSK, TPM)
+- ✅ Logging/Auditing
 
-### Phase 3 (Nice-to-Have):
-- ⏳ PPPoE Support (or evaluate VPP)
-- ⏳ IPoE Support
-- ⏳ Advanced QoS
-- ⏳ BGP Integration
+### Traffic Management (Complete):
+- ✅ QoS Rate Limiting
+- ✅ NAT44/CGNAT (Port blocks, hairpinning, ALGs)
 
-### Phase 4 (Future):
+### Protocol Support (Complete):
+- ✅ PPPoE (LCP, PAP/CHAP, IPCP/IPV6CP)
+- ✅ IPoE Support
+- ✅ DHCPv6 and SLAAC
+- ✅ IPv6 Prefix Delegation
+
+### Routing & Integration (Complete):
+- ✅ BGP/FRR Integration
+- ✅ QinQ Support
+- ✅ Option 82 Circuit-ID
+- ✅ CLSet Distributed State
+
+### Planned (Future):
 - 🔮 Multi-Tenancy
-- 🔮 High Availability
-- 🔮 DHCPv6
-- 🔮 IPv6 Routing
+- 🔮 High Availability (Active/Standby)
 
 ---
 
@@ -531,5 +539,5 @@ When assigning features to agents, use this template:
 
 ---
 
-**Status**: Feature specification complete
-**Last Updated**: 16 Dec 2025
+**Status**: All features implemented (v0.2.0)
+**Last Updated**: 22 Jan 2026

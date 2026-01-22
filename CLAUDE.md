@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is an eBPF-accelerated Broadband Network Gateway (BNG) implementation designed for **bare metal deployment on OLT hardware** at ISP edge locations. Each OLT-BNG serves 1,000-2,000 subscribers with 10-40 Gbps uplink capacity.
 
-**Status**: Design phase, implementation starting
+**Status**: v0.2.0 released - Full BNG functionality with eBPF DHCP fast path, PPPoE, NAT44/CGNAT, IPv6, BGP integration
 
 **Key Innovation**: Using eBPF/XDP for DHCP fast path instead of traditional userspace processing or VPP, achieving 10x performance improvement. The BNG runs directly on OLT hardware as a systemd service, eliminating dedicated BNG appliances.
 
@@ -258,39 +258,29 @@ tilt up
   - Agent task template for delegating work
   - Covers: DHCP, RADIUS, QoS, NAT44, PPPoE/IPoE, routing, logging, monitoring
 
-## Current Phase: Phase 1 - Local Development Environment
+## Current Status: v0.2.0 Released
 
-**PRIORITY TASKS** (from docs/TODO.md):
+All core BNG functionality has been implemented:
 
-1. **Create k3d config for Cilium CNI**
-   - Disable default Flannel: `--flannel-backend=none`
-   - Disable default kube-proxy: `--disable=traefik`
-   - Configure port mappings (80, 443, DHCP ports 67/68)
-   - Set up local registry
+### Implemented Features (v0.2.0)
+- **eBPF/XDP DHCP Fast Path**: Sub-100μs latency, 50,000+ req/sec
+- **PPPoE Stack**: LCP, PAP/CHAP, IPCP/IPV6CP, keep-alive, teardown
+- **NAT44/CGNAT**: Port blocks, logging, hairpinning, ALGs, EIM
+- **IPv6 Support**: DHCPv6 server and SLAAC with prefix delegation
+- **BGP/FRR Integration**: Subscriber route injection with BFD
+- **Device Authentication**: mTLS, PSK, TPM-based attestation
+- **RADIUS Hardening**: Interim updates, teardown accounting, CoA
+- **Partition Resilience**: Pool exhaustion handling, conflict detection
+- **QinQ Support**: Double VLAN tagging for service providers
+- **Option 82 Circuit-ID**: Verifier-safe fixed-offset parsing
+- **CLSet Store**: Distributed state with read/write modes
 
-2. **Set up helmfile for Cilium + Hubble**
-   - Create `charts/helmfile.yaml` with Cilium chart
-   - Add Hubble for observability
-   - Add Prometheus + Grafana
-   - Create `charts/hydrate.sh` (adapt from predbat-saas-infra)
+### Current Focus
+- Production hardening and performance optimization
+- Deployment automation and monitoring
+- Integration testing with real OLT hardware
 
-3. **Create Tiltfile**
-   - k3d cluster creation (local_resource)
-   - Cilium installation trigger
-   - k8s_yaml for kustomize manifests
-   - Port forwarding
-   - Live reload for Go development
-
-4. **Test `tilt up` workflow**
-   - Verify cluster creation
-   - Verify Cilium installation
-   - Verify Hubble UI accessible
-
-**Reference Implementation**: `/Users/markgascoyne/go/src/github.com/codelaboratoryltd/predbat-saas-infra`
-- k3d config: `clusters/local-tilt/k3d-config-registry.template`
-- Helmfile: `charts/helmfile.yaml`
-- Hydrate script: `charts/hydrate.sh`
-- Tiltfile: `Tiltfile`
+See `CHANGELOG.md` for full version history.
 
 ## Important Notes for k3d + Cilium
 
@@ -710,5 +700,5 @@ This project was created to:
 
 **Author**: Mark Gascoyne
 **Email**: [Contact via GitHub]
-**Status**: Design phase, starting Phase 1 implementation
-**Last Updated**: 16 Dec 2025
+**Version**: v0.2.0
+**Last Updated**: 22 Jan 2026

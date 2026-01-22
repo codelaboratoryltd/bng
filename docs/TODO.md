@@ -345,15 +345,27 @@ Development task list for eBPF-accelerated Broadband Network Gateway.
 
 ## Current Focus
 
-**PRIORITY: Phase 1 - Local Development Environment**
+**Version 0.2.0 Released** - All core BNG functionality implemented.
 
-Next actions:
-1. Create k3d config with Cilium support
-2. Set up helmfile for Cilium + Hubble
-3. Create basic Tiltfile
-4. Test `tilt up` workflow
+Completed phases:
+- Phase 0: Project Setup ✅
+- Phase 1: Local Development Environment ✅
+- Phase 2: eBPF Development Environment ✅
+- Phase 3: DHCP Fast Path POC ✅
+- Phase 4: State Management (Stub) ✅
+- Phase 5: Observability & Metrics ✅
+- Phase 6: BNG Core Features ✅
+- Phase 7: Production Readiness ✅
+
+Current priorities:
+1. Production deployment and hardening
+2. Performance optimization
+3. Integration testing with OLT hardware
+4. Documentation updates
+
+See `CHANGELOG.md` for detailed feature list.
 
 ---
 
-**Status**: Design phase complete, starting implementation
-**Last Updated**: 16 Dec 2025
+**Status**: v0.2.0 released
+**Last Updated**: 22 Jan 2026
