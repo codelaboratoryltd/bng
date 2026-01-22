@@ -130,39 +130,54 @@ static __always_inline void update_stats(__u32 counter_type) {
 	}
 }
 
-/* Parse DHCP options to find message type */
+/* Maximum DHCP options area to scan (prevents verifier issues) */
+#define MAX_DHCP_OPTIONS_SCAN 128
+
+/* Parse DHCP options to find message type
+ * Uses offset-based parsing to help eBPF verifier track bounds
+ */
 static __always_inline __u8 get_dhcp_msg_type(struct dhcp_packet *dhcp, void *data_end) {
-	__u8 *opt = dhcp->options;
+	__u8 *options_start = dhcp->options;
+	__u32 offset = 0;
 
 	/* Limit option parsing to prevent infinite loops (eBPF verifier) */
 	#pragma unroll
-	for (int i = 0; i < 64; i++) {
-		/* Bounds check for option code */
-		if ((void *)(opt + 1) > data_end)
+	for (int i = 0; i < 32; i++) {
+		/* Strict offset limit - verifier needs constant bounds */
+		if (offset >= MAX_DHCP_OPTIONS_SCAN)
 			return 0;
 
-		__u8 code = *opt;
+		/* Bounds check for option code */
+		__u8 *opt_ptr = options_start + offset;
+		if ((void *)(opt_ptr + 1) > data_end)
+			return 0;
+
+		__u8 code = *opt_ptr;
 		if (code == DHCP_OPT_END)
 			return 0;
 		if (code == DHCP_OPT_PAD) {
-			opt++;
+			offset++;
 			continue;
 		}
 
-		/* Bounds check for option length */
-		if ((void *)(opt + 2) > data_end)
+		/* Bounds check for option length byte */
+		if ((void *)(opt_ptr + 2) > data_end)
 			return 0;
 
-		__u8 len = *(opt + 1);
+		__u8 len = *(opt_ptr + 1);
+
+		/* Sanity check length - prevents offset overflow */
+		if (len > 64)
+			return 0;
 
 		/* Bounds check for option data */
-		if ((void *)(opt + 2 + len) > data_end)
+		if ((void *)(opt_ptr + 2 + len) > data_end)
 			return 0;
 
 		if (code == DHCP_OPT_MSG_TYPE && len == 1)
-			return *(opt + 2);
+			return *(opt_ptr + 2);
 
-		opt += 2 + len;
+		offset += 2 + len;
 	}
 	return 0;
 }
