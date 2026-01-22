@@ -202,59 +202,50 @@ static __always_inline int is_zero_mac(__u8 *mac) {
 /* ========================================================================
  * Simple DHCP Option Parsing - Extract Message Type Only
  *
- * Simplified version for BPF verifier compatibility.
- * Only extracts Option 53 (Message Type) which is typically at offset 0-4
- * in the options area for standard DHCP packets.
+ * Fixed-position checks only for BPF verifier compatibility.
+ * Option 53 (Message Type) is typically one of the first options in DHCP.
+ * We check several fixed offsets where it commonly appears.
  * ======================================================================== */
 
 /* Extract DHCP message type from options
  * Returns the message type (1-8) or 0 if not found
  *
- * DHCP options layout: Option 53 (msg type) is typically first or second option
- * Format: [code][len][data] where code=53, len=1, data=msg_type
+ * We check fixed positions only - no variable offsets for verifier safety.
+ * Common DHCP option layouts place Option 53 early in the options area.
  */
 static __always_inline __u8 get_dhcp_msg_type(void *dhcp_base, void *data_end) {
 	/* DHCP options start at offset 240 (after fixed header + magic cookie) */
 	__u8 *opts = (__u8 *)dhcp_base + 240;
 
-	/* Check we have room for at least a few options (16 bytes) */
-	if ((void *)(opts + 16) > data_end)
+	/* Check we have room for 12 bytes of options */
+	if ((void *)(opts + 12) > data_end)
 		return 0;
 
-	/* Option 53 is typically in the first few bytes of options
-	 * Scan the first 16 bytes looking for it */
-	#pragma unroll
-	for (int i = 0; i < 16; i++) {
-		/* Bounds check */
-		if ((void *)(opts + i + 3) > data_end)
-			return 0;
+	/* Check fixed offset 0: [53][1][type] */
+	if (opts[0] == 53 && opts[1] == 1)
+		return opts[2];
 
-		__u8 code = opts[i];
+	/* Check fixed offset 1: [pad][53][1][type] */
+	if (opts[1] == 53 && opts[2] == 1)
+		return opts[3];
 
-		/* End marker */
-		if (code == 255)
-			return 0;
+	/* Check fixed offset 3: common for small first option */
+	if (opts[3] == 53 && opts[4] == 1)
+		return opts[5];
 
-		/* Skip PAD bytes */
-		if (code == 0)
-			continue;
+	/* Check fixed offset 4: another common position */
+	if (opts[4] == 53 && opts[5] == 1)
+		return opts[6];
 
-		/* Get option length */
-		__u8 len = opts[i + 1];
+	/* Check fixed offset 5 */
+	if (opts[5] == 53 && opts[6] == 1)
+		return opts[7];
 
-		/* Option 53 (Message Type) has length 1 */
-		if (code == 53 && len == 1) {
-			return opts[i + 2];
-		}
+	/* Check fixed offset 6 */
+	if (opts[6] == 53 && opts[7] == 1)
+		return opts[8];
 
-		/* Skip to next option: code + len + data */
-		i += 1 + len;  /* Loop will add 1 more */
-
-		/* Safety check */
-		if (i >= 14)
-			return 0;
-	}
-
+	/* Not found in first 12 bytes - pass to slow path */
 	return 0;
 }
 
