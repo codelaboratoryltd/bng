@@ -239,3 +239,107 @@ func TestHashCircuitIDKnownValues(t *testing.T) {
 		t.Errorf("HashCircuitID(%q) = 0x%x, want 0x%x", circuitID, hash, expected)
 	}
 }
+
+// Issue #56: Test CircuitIDKey fixed-size key generation
+func TestMakeCircuitIDKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		circuitID []byte
+		wantLen   int
+	}{
+		{
+			name:      "empty",
+			circuitID: []byte{},
+			wantLen:   CircuitIDKeyLen,
+		},
+		{
+			name:      "short circuit-id",
+			circuitID: []byte("eth 0/1/1:100"),
+			wantLen:   CircuitIDKeyLen,
+		},
+		{
+			name:      "exact 32 bytes",
+			circuitID: []byte("12345678901234567890123456789012"),
+			wantLen:   CircuitIDKeyLen,
+		},
+		{
+			name:      "longer than 32 bytes (truncated)",
+			circuitID: []byte("12345678901234567890123456789012345678901234567890"),
+			wantLen:   CircuitIDKeyLen,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := MakeCircuitIDKey(tt.circuitID)
+			if len(key) != tt.wantLen {
+				t.Errorf("MakeCircuitIDKey() length = %d, want %d", len(key), tt.wantLen)
+			}
+
+			// Verify the data is correctly copied
+			expectedLen := len(tt.circuitID)
+			if expectedLen > CircuitIDKeyLen {
+				expectedLen = CircuitIDKeyLen
+			}
+			for i := 0; i < expectedLen; i++ {
+				if key[i] != tt.circuitID[i] {
+					t.Errorf("MakeCircuitIDKey()[%d] = 0x%02x, want 0x%02x", i, key[i], tt.circuitID[i])
+				}
+			}
+
+			// Verify padding is zeros
+			for i := expectedLen; i < CircuitIDKeyLen; i++ {
+				if key[i] != 0 {
+					t.Errorf("MakeCircuitIDKey()[%d] = 0x%02x, want 0x00 (padding)", i, key[i])
+				}
+			}
+		})
+	}
+}
+
+// Test CircuitIDKey determinism
+func TestMakeCircuitIDKeyDeterministic(t *testing.T) {
+	circuitID := []byte("eth 0/1/1:100.200")
+	key1 := MakeCircuitIDKey(circuitID)
+	key2 := MakeCircuitIDKey(circuitID)
+
+	if key1 != key2 {
+		t.Error("MakeCircuitIDKey is not deterministic")
+	}
+}
+
+// Test CircuitIDKey uniqueness for different inputs
+func TestMakeCircuitIDKeyUniqueness(t *testing.T) {
+	circuitIDs := [][]byte{
+		[]byte("eth 0/1/1:100"),
+		[]byte("eth 0/1/2:100"),
+		[]byte("eth 0/1/1:200"),
+		[]byte("FSAN:ALCL12345678"),
+		[]byte("access-node-id eth 0/1/1 atm 0/100"),
+	}
+
+	keys := make(map[CircuitIDKey][]byte)
+	for _, cid := range circuitIDs {
+		key := MakeCircuitIDKey(cid)
+		if existing, ok := keys[key]; ok {
+			t.Errorf("Key collision between %q and %q", existing, cid)
+		}
+		keys[key] = cid
+	}
+}
+
+// Test CircuitIDKeyLen constant
+func TestCircuitIDKeyLen(t *testing.T) {
+	// Must match CIRCUIT_ID_KEY_LEN in maps.h
+	if CircuitIDKeyLen != 32 {
+		t.Errorf("CircuitIDKeyLen = %d, want 32", CircuitIDKeyLen)
+	}
+}
+
+// Test that CircuitIDKey size matches expected
+func TestCircuitIDKeySize(t *testing.T) {
+	var key CircuitIDKey
+	if len(key) != 32 {
+		t.Errorf("CircuitIDKey size = %d bytes, want 32 bytes", len(key))
+	}
+}
