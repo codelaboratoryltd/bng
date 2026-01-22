@@ -333,47 +333,4 @@ func (s *CLSetStore) notifyWatchers(key string, value []byte, deleted bool) {
 	}
 }
 
-// --- CRDT Backend (to be implemented) ---
-
-// newCRDTBackend creates a CRDT backend using go-ds-crdt + libp2p.
-// This mirrors the implementation in nexus/internal/state/state.go.
-func newCRDTBackend(config CLSetConfig) (crdtBackend, error) {
-	// TODO: Implement using go-ds-crdt + libp2p
-	//
-	// Implementation steps (see nexus/internal/state/state.go for reference):
-	//
-	// 1. Generate or load private key for libp2p identity
-	//
-	// 2. Create libp2p host:
-	//    listen, _ := multiaddr.NewMultiaddr(config.ListenAddr)
-	//    h, dht, _ := ipfslite.SetupLibp2p(ctx, privKey, nil, []multiaddr.Multiaddr{listen}, datastore, ...)
-	//
-	// 3. Create GossipSub pubsub:
-	//    ps, _ := libpubsub.NewGossipSub(ctx, h)
-	//
-	// 4. Create CRDT broadcaster:
-	//    pubsubBC, _ := crdt.NewPubSubBroadcaster(ctx, ps, config.Topic)
-	//
-	// 5. Create CRDT datastore with hooks:
-	//    opts := crdt.DefaultOptions()
-	//    opts.RebroadcastInterval = config.RebroadcastInterval
-	//    opts.PutHook = func(k ds.Key, v []byte) { /* notify watchers */ }
-	//    opts.DeleteHook = func(k ds.Key) { /* notify watchers */ }
-	//    opts.MembershipHook = func(members map[string]*pb.Participant) { /* track members */ }
-	//    crdtDatastore, _ := crdt.New(h, datastore, blockstore, namespace, dag, pubsubBC, opts)
-	//
-	// 6. Set node metadata:
-	//    crdtDatastore.UpdateMeta(ctx, map[string]string{
-	//        "name": config.NodeName,
-	//        "role": string(config.Mode),  // "read" or "write"
-	//    })
-	//
-	// 7. Bootstrap to peers:
-	//    for _, addr := range config.BootstrapPeers { h.Connect(ctx, peerInfo) }
-	//
-	// Key difference from nexus:
-	// - Nexus manages hashring internally for IP allocation
-	// - BNG just needs the CRDT store, hashring is handled by DistributedAllocator
-	//
-	return nil, fmt.Errorf("CRDT backend not yet implemented - see nexus/internal/state/state.go for reference")
-}
+// newCRDTBackend is implemented in crdt_backend.go
