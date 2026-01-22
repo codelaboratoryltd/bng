@@ -207,7 +207,9 @@ var _ = Describe("Session Teardown", func() {
 
 			clientMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
 			serverMAC, _ := net.ParseMAC("11:22:33:44:55:66")
-			session = sessionManager.CreateSession(clientMAC, serverMAC)
+			var err error
+			session, err = sessionManager.CreateSession(clientMAC, serverMAC)
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("should validate client MAC", func() {

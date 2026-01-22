@@ -245,9 +245,12 @@ var _ = Describe("IPV6CP State Machine", func() {
 
 	BeforeEach(func() {
 		logger, _ = zap.NewDevelopment()
-		config = pppoe.DefaultIPV6CPConfig()
+		var err error
+		config, err = pppoe.DefaultIPV6CPConfig()
+		Expect(err).NotTo(HaveOccurred())
 		sentPackets = nil
-		ipv6cp = pppoe.NewIPV6CPStateMachine(config, sendPacket, logger)
+		ipv6cp, err = pppoe.NewIPV6CPStateMachine(config, sendPacket, logger)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	Describe("State Machine Initialization", func() {

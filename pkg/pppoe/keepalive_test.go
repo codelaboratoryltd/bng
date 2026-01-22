@@ -69,7 +69,8 @@ var _ = Describe("Keep-Alive", func() {
 		It("should register sessions", func() {
 			clientMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
 			serverMAC, _ := net.ParseMAC("11:22:33:44:55:66")
-			session := pppoe.NewSession(1, clientMAC, serverMAC)
+			session, err := pppoe.NewSession(1, clientMAC, serverMAC)
+			Expect(err).NotTo(HaveOccurred())
 
 			manager.RegisterSession(session)
 
@@ -82,7 +83,8 @@ var _ = Describe("Keep-Alive", func() {
 		It("should unregister sessions", func() {
 			clientMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
 			serverMAC, _ := net.ParseMAC("11:22:33:44:55:66")
-			session := pppoe.NewSession(1, clientMAC, serverMAC)
+			session, err := pppoe.NewSession(1, clientMAC, serverMAC)
+			Expect(err).NotTo(HaveOccurred())
 
 			manager.RegisterSession(session)
 			manager.UnregisterSession(session.ID)
@@ -94,7 +96,8 @@ var _ = Describe("Keep-Alive", func() {
 		It("should update activity", func() {
 			clientMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
 			serverMAC, _ := net.ParseMAC("11:22:33:44:55:66")
-			session := pppoe.NewSession(1, clientMAC, serverMAC)
+			session, err := pppoe.NewSession(1, clientMAC, serverMAC)
+			Expect(err).NotTo(HaveOccurred())
 
 			manager.RegisterSession(session)
 			time.Sleep(10 * time.Millisecond)
@@ -129,10 +132,13 @@ var _ = Describe("Keep-Alive", func() {
 		BeforeEach(func() {
 			clientMAC, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
 			serverMAC, _ := net.ParseMAC("11:22:33:44:55:66")
-			session = pppoe.NewSession(1, clientMAC, serverMAC)
+			var err error
+			session, err = pppoe.NewSession(1, clientMAC, serverMAC)
+			Expect(err).NotTo(HaveOccurred())
 
 			lcpConfig := pppoe.DefaultLCPConfig()
-			lcp = pppoe.NewLCPStateMachine(lcpConfig, func(uint16, []byte) {}, logger)
+			lcp, err = pppoe.NewLCPStateMachine(lcpConfig, func(uint16, []byte) {}, logger)
+			Expect(err).NotTo(HaveOccurred())
 
 			keepalive = pppoe.NewSessionKeepAlive(session, lcp, config, logger)
 		})

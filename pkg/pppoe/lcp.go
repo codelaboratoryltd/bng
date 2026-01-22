@@ -129,10 +129,14 @@ type LCPStateMachine struct {
 }
 
 // NewLCPStateMachine creates a new LCP state machine
-func NewLCPStateMachine(config LCPConfig, sendPacket func(uint16, []byte), logger *zap.Logger) *LCPStateMachine {
+func NewLCPStateMachine(config LCPConfig, sendPacket func(uint16, []byte), logger *zap.Logger) (*LCPStateMachine, error) {
 	// Generate random magic number if not set
 	if config.MagicNumber == 0 {
-		config.MagicNumber = generateMagicNumber()
+		magic, err := generateMagicNumber()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate magic number: %w", err)
+		}
+		config.MagicNumber = magic
 	}
 
 	return &LCPStateMachine{
@@ -144,7 +148,7 @@ func NewLCPStateMachine(config LCPConfig, sendPacket func(uint16, []byte), logge
 			LocalMRU:   config.MRU,
 			LocalMagic: config.MagicNumber,
 		},
-	}
+	}, nil
 }
 
 // SetOnStateChange sets the state change callback
@@ -433,15 +437,33 @@ func (lcp *LCPStateMachine) processConfigureOptions(opts []LCPOption) (ack, nak,
 			if magic == 0 {
 				// NAK with a random value
 				nakOpt := LCPOption{Type: LCPOptMagicNumber, Data: make([]byte, 4)}
-				binary.BigEndian.PutUint32(nakOpt.Data, generateMagicNumber())
+				suggestedMagic, err := generateMagicNumber()
+				if err != nil {
+					lcp.logger.Error("Failed to generate magic number for NAK", zap.Error(err))
+					reject = append(reject, opt)
+					continue
+				}
+				binary.BigEndian.PutUint32(nakOpt.Data, suggestedMagic)
 				nak = append(nak, nakOpt)
 			} else if magic == lcp.config.MagicNumber {
 				// Loop detected! NAK with a different value
 				lcp.logger.Warn("LCP magic number collision detected, regenerating")
-				lcp.config.MagicNumber = generateMagicNumber()
+				newMagic, err := generateMagicNumber()
+				if err != nil {
+					lcp.logger.Error("Failed to regenerate magic number", zap.Error(err))
+					reject = append(reject, opt)
+					continue
+				}
+				lcp.config.MagicNumber = newMagic
 				lcp.negotiated.LocalMagic = lcp.config.MagicNumber
 				nakOpt := LCPOption{Type: LCPOptMagicNumber, Data: make([]byte, 4)}
-				binary.BigEndian.PutUint32(nakOpt.Data, generateMagicNumber())
+				suggestedMagic, err := generateMagicNumber()
+				if err != nil {
+					lcp.logger.Error("Failed to generate magic number for NAK", zap.Error(err))
+					reject = append(reject, opt)
+					continue
+				}
+				binary.BigEndian.PutUint32(nakOpt.Data, suggestedMagic)
 				nak = append(nak, nakOpt)
 			} else {
 				ack = append(ack, opt)
@@ -564,8 +586,13 @@ func (lcp *LCPStateMachine) receiveConfigureNak(pkt *LCPPacket) error {
 		case LCPOptMagicNumber:
 			if len(opt.Data) >= 4 {
 				// Regenerate magic number
-				lcp.config.MagicNumber = generateMagicNumber()
-				lcp.negotiated.LocalMagic = lcp.config.MagicNumber
+				newMagic, err := generateMagicNumber()
+				if err != nil {
+					lcp.logger.Error("Failed to regenerate magic number on NAK", zap.Error(err))
+				} else {
+					lcp.config.MagicNumber = newMagic
+					lcp.negotiated.LocalMagic = lcp.config.MagicNumber
+				}
 			}
 		}
 	}
@@ -940,8 +967,10 @@ func (lcp *LCPStateMachine) IsOpened() bool {
 }
 
 // generateMagicNumber generates a random 32-bit magic number
-func generateMagicNumber() uint32 {
+func generateMagicNumber() (uint32, error) {
 	b := make([]byte, 4)
-	rand.Read(b)
-	return binary.BigEndian.Uint32(b)
+	if _, err := rand.Read(b); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(b), nil
 }

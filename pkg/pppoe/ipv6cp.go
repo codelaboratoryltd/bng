@@ -68,12 +68,16 @@ type IPV6CPConfig struct {
 }
 
 // DefaultIPV6CPConfig returns default IPV6CP configuration
-func DefaultIPV6CPConfig() IPV6CPConfig {
+func DefaultIPV6CPConfig() (IPV6CPConfig, error) {
+	id, err := generateInterfaceID()
+	if err != nil {
+		return IPV6CPConfig{}, fmt.Errorf("failed to generate interface ID: %w", err)
+	}
 	return IPV6CPConfig{
-		LocalInterfaceID: generateInterfaceID(),
+		LocalInterfaceID: id,
 		MaxRetransmit:    10,
 		RestartTimer:     3 * time.Second,
-	}
+	}, nil
 }
 
 // IPV6CPNegotiatedOptions holds the negotiated IPV6CP options
@@ -110,9 +114,13 @@ type IPV6CPStateMachine struct {
 }
 
 // NewIPV6CPStateMachine creates a new IPV6CP state machine
-func NewIPV6CPStateMachine(config IPV6CPConfig, sendPacket func(uint16, []byte), logger *zap.Logger) *IPV6CPStateMachine {
+func NewIPV6CPStateMachine(config IPV6CPConfig, sendPacket func(uint16, []byte), logger *zap.Logger) (*IPV6CPStateMachine, error) {
 	if config.LocalInterfaceID == 0 {
-		config.LocalInterfaceID = generateInterfaceID()
+		id, err := generateInterfaceID()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate interface ID: %w", err)
+		}
+		config.LocalInterfaceID = id
 	}
 
 	return &IPV6CPStateMachine{
@@ -123,7 +131,7 @@ func NewIPV6CPStateMachine(config IPV6CPConfig, sendPacket func(uint16, []byte),
 		negotiated: IPV6CPNegotiatedOptions{
 			LocalInterfaceID: config.LocalInterfaceID,
 		},
-	}
+	}, nil
 }
 
 // SetOnStateChange sets the state change callback
@@ -359,7 +367,12 @@ func (ipv6cp *IPV6CPStateMachine) processConfigureOptions(opts []LCPOption) (ack
 			// Check for zero interface ID
 			if peerID == 0 {
 				// NAK with a random interface ID
-				newID := generateInterfaceID()
+				newID, err := generateInterfaceID()
+				if err != nil {
+					ipv6cp.logger.Error("Failed to generate interface ID for NAK", zap.Error(err))
+					reject = append(reject, opt)
+					continue
+				}
 				nakOpt := LCPOption{
 					Type: IPV6CPOptInterfaceID,
 					Data: make([]byte, 8),
@@ -372,10 +385,21 @@ func (ipv6cp *IPV6CPStateMachine) processConfigureOptions(opts []LCPOption) (ack
 			// Check for collision with our ID
 			if peerID == ipv6cp.config.LocalInterfaceID {
 				// Collision - regenerate our ID and NAK with new one for peer
-				ipv6cp.config.LocalInterfaceID = generateInterfaceID()
+				newLocalID, err := generateInterfaceID()
+				if err != nil {
+					ipv6cp.logger.Error("Failed to regenerate local interface ID", zap.Error(err))
+					reject = append(reject, opt)
+					continue
+				}
+				ipv6cp.config.LocalInterfaceID = newLocalID
 				ipv6cp.negotiated.LocalInterfaceID = ipv6cp.config.LocalInterfaceID
 
-				newPeerID := generateInterfaceID()
+				newPeerID, err := generateInterfaceID()
+				if err != nil {
+					ipv6cp.logger.Error("Failed to generate peer interface ID for NAK", zap.Error(err))
+					reject = append(reject, opt)
+					continue
+				}
 				nakOpt := LCPOption{
 					Type: IPV6CPOptInterfaceID,
 					Data: make([]byte, 8),
@@ -647,10 +671,12 @@ func (ipv6cp *IPV6CPStateMachine) IsOpened() bool {
 }
 
 // generateInterfaceID generates a random 64-bit interface identifier
-func generateInterfaceID() uint64 {
+func generateInterfaceID() (uint64, error) {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return 0, err
+	}
 	// Set the universal/local bit to indicate locally administered
 	b[0] |= 0x02
-	return binary.BigEndian.Uint64(b)
+	return binary.BigEndian.Uint64(b), nil
 }

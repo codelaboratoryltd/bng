@@ -49,7 +49,9 @@ var _ = Describe("LCP State Machine", func() {
 		config = pppoe.DefaultLCPConfig()
 		config.RestartTimer = 100 * time.Millisecond // Short timer for tests
 		sentPackets = nil
-		lcp = pppoe.NewLCPStateMachine(config, sendPacket, logger)
+		var err error
+		lcp, err = pppoe.NewLCPStateMachine(config, sendPacket, logger)
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	Describe("State Machine Initialization", func() {

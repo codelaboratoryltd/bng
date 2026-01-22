@@ -148,16 +148,19 @@ func (a *Authenticator) GetUsername() string {
 }
 
 // Start initiates the authentication process
-func (a *Authenticator) Start() {
+func (a *Authenticator) Start() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	a.state = AuthStatePending
 
 	if a.config.Protocol == ProtocolCHAP {
-		a.sendCHAPChallenge()
+		if err := a.sendCHAPChallenge(); err != nil {
+			return err
+		}
 	}
 	// For PAP, we wait for the peer to send Authenticate-Request
+	return nil
 }
 
 // ReceivePacket processes an incoming authentication packet
@@ -311,12 +314,14 @@ func (a *Authenticator) receiveCHAP(data []byte) error {
 }
 
 // sendCHAPChallenge sends a CHAP Challenge
-func (a *Authenticator) sendCHAPChallenge() {
+func (a *Authenticator) sendCHAPChallenge() error {
 	a.chapID++
 
 	// Generate random challenge
 	a.challenge = make([]byte, a.config.ChallengeLength)
-	rand.Read(a.challenge)
+	if _, err := rand.Read(a.challenge); err != nil {
+		return fmt.Errorf("failed to generate challenge: %w", err)
+	}
 
 	nameBytes := []byte(a.config.CHAPIdentifier)
 
@@ -336,6 +341,8 @@ func (a *Authenticator) sendCHAPChallenge() {
 	a.logger.Debug("CHAP challenge sent",
 		zap.Uint8("identifier", a.chapID),
 	)
+
+	return nil
 }
 
 // handleCHAPResponse handles CHAP Response
@@ -438,10 +445,12 @@ func (a *Authenticator) authenticateCHAP(username string, response []byte) *Auth
 	if a.radiusClient != nil {
 		// Use RADIUS for CHAP authentication
 		// RADIUS needs the challenge and response for CHAP
-		authResp, err := a.radiusClient.Authenticate(context.Background(), &radius.AuthRequest{
+		ctx, cancel := context.WithTimeout(context.Background(), a.config.Timeout)
+		defer cancel()
+		// TODO: CHAP-Password attribute (RFC 2865 section 5.3) needs to be implemented
+		// for full RADIUS CHAP support. Currently this sends username only.
+		authResp, err := a.radiusClient.Authenticate(ctx, &radius.AuthRequest{
 			Username: username,
-			// Note: For CHAP, we would need to send CHAP-Password attribute
-			// This would require extending the RADIUS client
 		})
 
 		if err != nil {
@@ -483,7 +492,9 @@ func (a *Authenticator) authenticate(username, password string, chapResponse []b
 	}
 
 	if a.radiusClient != nil {
-		authResp, err := a.radiusClient.Authenticate(context.Background(), &radius.AuthRequest{
+		ctx, cancel := context.WithTimeout(context.Background(), a.config.Timeout)
+		defer cancel()
+		authResp, err := a.radiusClient.Authenticate(ctx, &radius.AuthRequest{
 			Username: username,
 			Password: password,
 		})
@@ -562,11 +573,14 @@ func (a *Authenticator) recordFailure() {
 
 // SendReauthChallenge sends a re-authentication CHAP challenge
 // This is used for periodic re-authentication in CHAP
-func (a *Authenticator) SendReauthChallenge() {
+func (a *Authenticator) SendReauthChallenge() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.state == AuthStateSuccess && a.config.Protocol == ProtocolCHAP {
-		a.sendCHAPChallenge()
+		if err := a.sendCHAPChallenge(); err != nil {
+			return err
+		}
 	}
+	return nil
 }
