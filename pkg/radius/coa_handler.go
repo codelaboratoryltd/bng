@@ -176,10 +176,15 @@ func (p *CoAProcessor) HandleCoA(ctx context.Context, req *CoARequest) *CoARespo
 	startTime := time.Now()
 	atomic.AddUint64(&p.coaProcessed, 1)
 
+	framedIPStr := ""
+	if req.FramedIP != nil {
+		framedIPStr = req.FramedIP.String()
+	}
+
 	p.logger.Info("Processing CoA request",
 		zap.String("session_id", req.SessionID),
 		zap.String("username", req.Username),
-		zap.String("framed_ip", req.FramedIP.String()),
+		zap.String("framed_ip", framedIPStr),
 		zap.String("calling_station", req.CallingStation),
 		zap.String("filter_id", req.FilterID),
 	)
@@ -248,10 +253,15 @@ func (p *CoAProcessor) HandleDisconnect(ctx context.Context, req *DisconnectRequ
 	startTime := time.Now()
 	atomic.AddUint64(&p.disconnProcessed, 1)
 
+	disconnFramedIPStr := ""
+	if req.FramedIP != nil {
+		disconnFramedIPStr = req.FramedIP.String()
+	}
+
 	p.logger.Info("Processing Disconnect request",
 		zap.String("session_id", req.SessionID),
 		zap.String("username", req.Username),
-		zap.String("framed_ip", req.FramedIP.String()),
+		zap.String("framed_ip", disconnFramedIPStr),
 		zap.String("calling_station", req.CallingStation),
 	)
 
@@ -541,10 +551,15 @@ func NewDefaultAuditLogger(logger *zap.Logger) *DefaultAuditLogger {
 
 // LogCoARequest logs a CoA request
 func (l *DefaultAuditLogger) LogCoARequest(req *CoARequest, response *CoAResponse, duration time.Duration) {
+	framedIPStr := ""
+	if req.FramedIP != nil {
+		framedIPStr = req.FramedIP.String()
+	}
+
 	l.logger.Info("AUDIT: CoA Request",
 		zap.String("session_id", req.SessionID),
 		zap.String("username", req.Username),
-		zap.String("framed_ip", req.FramedIP.String()),
+		zap.String("framed_ip", framedIPStr),
 		zap.String("calling_station", req.CallingStation),
 		zap.String("filter_id", req.FilterID),
 		zap.Uint32("qos_download_kbps", req.QoSDownload),
@@ -560,11 +575,16 @@ func (l *DefaultAuditLogger) LogCoARequest(req *CoARequest, response *CoARespons
 
 // LogDisconnectRequest logs a Disconnect request
 func (l *DefaultAuditLogger) LogDisconnectRequest(req *DisconnectRequest, response *DisconnectResponse, duration time.Duration) {
+	framedIPStr := ""
+	if req.FramedIP != nil {
+		framedIPStr = req.FramedIP.String()
+	}
+
 	l.logger.Info("AUDIT: Disconnect Request",
 		zap.String("session_id", req.SessionID),
 		zap.String("acct_session_id", req.AcctSessionID),
 		zap.String("username", req.Username),
-		zap.String("framed_ip", req.FramedIP.String()),
+		zap.String("framed_ip", framedIPStr),
 		zap.String("calling_station", req.CallingStation),
 		zap.Bool("success", response.Success),
 		zap.Uint32("error_cause", response.ErrorCause),

@@ -59,7 +59,8 @@ type AccountingConfig struct {
 	// Interim update settings
 	DefaultInterimInterval time.Duration // Default interval for interim updates (default: 300s)
 	InterimEnabled         bool          // Enable interim updates globally
-	BatchSize              int           // Number of counter reads to batch (default: 100)
+	// TODO: BatchSize will be used in future for batching eBPF counter reads for efficiency
+	BatchSize int // Number of counter reads to batch (default: 100)
 
 	// Reliability settings
 	MaxRetries     int           // Maximum retries for accounting records (default: 10)
@@ -739,7 +740,7 @@ func (am *AccountingManager) persistActiveSession(session *AccountingSession) {
 		return
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		am.logger.Debug("Failed to persist session", zap.Error(err))
 	}
 }
@@ -765,7 +766,7 @@ func (am *AccountingManager) persistPendingRecords() error {
 		return fmt.Errorf("marshal pending records: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("write pending records: %w", err)
 	}
 
