@@ -45,15 +45,6 @@ struct vlan_hdr {
 /* Extract VLAN ID from TCI */
 #define VLAN_VID_MASK 0x0FFF
 
-/* VLAN parsing context */
-struct vlan_info {
-	__u16 s_tag;           /* Outer VLAN (S-TAG) - 0 if single-tagged or untagged */
-	__u16 c_tag;           /* Inner VLAN (C-TAG) - 0 if untagged */
-	__u16 proto;           /* Final protocol after VLAN headers */
-	__u8  vlan_depth;      /* 0=untagged, 1=single, 2=double (QinQ) */
-	__u8  _pad;
-};
-
 /* DHCP packet structure (fixed portion before options) */
 struct dhcp_packet {
 	__u8  op;           /* 1 = BOOTREQUEST, 2 = BOOTREPLY */
@@ -213,85 +204,6 @@ static __always_inline __u64 mac_to_u64(__u8 *mac) {
 		result = (result << 8) | mac[i];
 	}
 	return result;
-}
-
-/* Parse VLAN headers (supports untagged, 802.1Q, and QinQ 802.1ad)
- * Returns pointer to payload after VLAN headers, or NULL on error
- */
-static __always_inline void *parse_vlan_headers(struct ethhdr *eth, void *data_end,
-                                                 struct vlan_info *vinfo) {
-	void *payload = (void *)(eth + 1);
-	__u16 proto = bpf_ntohs(eth->h_proto);
-
-	/* Initialize VLAN info */
-	vinfo->s_tag = 0;
-	vinfo->c_tag = 0;
-	vinfo->vlan_depth = 0;
-	vinfo->proto = proto;
-
-	/* Check for outer VLAN tag (802.1ad S-TAG for QinQ) */
-	if (proto == ETH_P_8021AD) {
-		struct vlan_hdr *outer_vlan = payload;
-		if ((void *)(outer_vlan + 1) > data_end)
-			return NULL;
-
-		vinfo->s_tag = bpf_ntohs(outer_vlan->h_vlan_TCI) & VLAN_VID_MASK;
-		proto = bpf_ntohs(outer_vlan->h_vlan_encapsulated_proto);
-		payload = (void *)(outer_vlan + 1);
-		vinfo->vlan_depth = 1;
-	}
-
-	/* Check for inner VLAN tag (802.1Q C-TAG) */
-	if (proto == ETH_P_8021Q) {
-		struct vlan_hdr *inner_vlan = payload;
-		if ((void *)(inner_vlan + 1) > data_end)
-			return NULL;
-
-		/* If we already have an outer tag, this is the C-TAG
-		 * If not, treat this as a single-tagged frame (C-TAG only) */
-		__u16 vid = bpf_ntohs(inner_vlan->h_vlan_TCI) & VLAN_VID_MASK;
-		if (vinfo->vlan_depth == 0) {
-			/* Single-tagged: this is the C-TAG */
-			vinfo->c_tag = vid;
-			vinfo->vlan_depth = 1;
-		} else {
-			/* Double-tagged (QinQ): this is the C-TAG */
-			vinfo->c_tag = vid;
-			vinfo->vlan_depth = 2;
-		}
-		proto = bpf_ntohs(inner_vlan->h_vlan_encapsulated_proto);
-		payload = (void *)(inner_vlan + 1);
-	}
-
-	vinfo->proto = proto;
-	return payload;
-}
-
-/* Update statistics counters (legacy interface) */
-static __always_inline void update_stats(__u32 counter_type) {
-	__u32 key = 0;
-	struct dhcp_stats *stats = bpf_map_lookup_elem(&stats_map, &key);
-	if (!stats)
-		return;
-
-	/* counter_type: 0=total, 1=fastpath_hit, 2=fastpath_miss, 3=error, 4=expired */
-	switch (counter_type) {
-	case 0:
-		__sync_fetch_and_add(&stats->total_requests, 1);
-		break;
-	case 1:
-		__sync_fetch_and_add(&stats->fastpath_hits, 1);
-		break;
-	case 2:
-		__sync_fetch_and_add(&stats->fastpath_misses, 1);
-		break;
-	case 3:
-		__sync_fetch_and_add(&stats->errors, 1);
-		break;
-	case 4:
-		__sync_fetch_and_add(&stats->cache_expired, 1);
-		break;
-	}
 }
 
 /* Copy MAC address with proper bounds checking */
