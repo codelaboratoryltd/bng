@@ -45,7 +45,7 @@ type IPPool struct {
 	_            uint32 // Padding
 }
 
-// DHCPStats represents DHCP performance counters (mirrors eBPF struct)
+// DHCPStats must match the layout of dhcp_stats in bpf/maps.h
 type DHCPStats struct {
 	TotalRequests    uint64
 	FastpathHits     uint64
@@ -198,6 +198,10 @@ func (l *Loader) Load(ctx context.Context) error {
 	}
 
 	// Issue #15: Circuit-ID map (optional - may not be present in older programs)
+	// circuit_id_map uses FNV-1a hash as key. While FNV-1a has good distribution,
+	// hash collisions are possible with very large subscriber counts (1M+).
+	// For production deployments at scale, consider monitoring collision metrics
+	// or implementing collision detection in the value struct.
 	l.circuitIDMap = coll.Maps["circuit_id_map"]
 	if l.circuitIDMap == nil {
 		l.logger.Warn("circuit_id_map not found - Option 82 circuit-id lookup disabled")

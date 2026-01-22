@@ -165,7 +165,9 @@ struct {
 	__type(value, struct dhcp_server_config);
 } server_config SEC(".maps");
 
-/* Performance counters - not packed to ensure proper alignment for atomic ops */
+/* Performance counters - not packed to ensure proper alignment for atomic ops
+ * NOTE: This struct must match the layout of DHCPStats in pkg/ebpf/loader.go
+ */
 struct dhcp_stats {
 	__u64 total_requests;
 	__u64 fastpath_hits;

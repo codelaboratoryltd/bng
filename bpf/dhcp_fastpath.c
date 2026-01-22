@@ -332,7 +332,9 @@ static __always_inline void parse_option82(__u8 *opt82_data, __u8 opt82_len,
                                            struct dhcp_parsed_options *opts) {
 	__u32 offset = 0;
 
-	/* Bound to maximum reasonable Option 82 size */
+	// Limit Option 82 to 128 bytes - this covers typical relay agent info
+	// while staying within eBPF stack limits. Per RFC 3046, Option 82 can
+	// technically be up to 255 bytes, but real-world usage is typically <100.
 	if (opt82_len > 128)
 		opt82_len = 128;
 
