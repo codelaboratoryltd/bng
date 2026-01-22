@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/codelaboratoryltd/bng/pkg/allocator"
 	"go.uber.org/zap"
 )
 
@@ -25,11 +26,20 @@ type Server struct {
 	dnsServers   []net.IP
 	domainSearch []string
 
-	// Address pool
+	// Address pool (legacy - use addressAllocator when available)
 	addressPool *AddressPool
 
-	// Prefix delegation pool
+	// Prefix delegation pool (legacy - use prefixAllocator when available)
 	prefixPool *PrefixPool
+
+	// Integrated allocators (preferred when available)
+	addressAllocator *allocator.PoolAllocator
+	prefixAllocator  *allocator.PoolAllocator
+	allocStore       allocator.AllocationStore
+
+	// Lifetimes for allocator-based allocation
+	preferredLifetime uint32
+	validLifetime     uint32
 
 	// Lease management
 	leases   map[string]*Lease // client DUID -> lease
@@ -85,13 +95,18 @@ type Lease struct {
 // ServerConfig configures the DHCPv6 server
 type ServerConfig struct {
 	Interface         string
-	AddressPool       string // CIDR for address pool
-	PrefixPool        string // CIDR for prefix delegation pool
+	AddressPool       string // CIDR for address pool (legacy mode)
+	PrefixPool        string // CIDR for prefix delegation pool (legacy mode)
 	DelegationLength  uint8  // Prefix length to delegate (e.g., 56, 60, 64)
 	DNSServers        []string
 	DomainSearch      []string
 	PreferredLifetime uint32
 	ValidLifetime     uint32
+
+	// Integrated allocator support (preferred over legacy pools)
+	AddressAllocator *allocator.PoolAllocator
+	PrefixAllocator  *allocator.PoolAllocator
+	AllocationStore  allocator.AllocationStore
 }
 
 // NewServer creates a new DHCPv6 server
@@ -136,9 +151,18 @@ func NewServer(cfg ServerConfig, logger *zap.Logger) (*Server, error) {
 	if validLifetime == 0 {
 		validLifetime = 7200 // 2 hours
 	}
+	s.preferredLifetime = preferredLifetime
+	s.validLifetime = validLifetime
 
-	// Create address pool
-	if cfg.AddressPool != "" {
+	// Use integrated allocators if provided (preferred)
+	if cfg.AddressAllocator != nil {
+		s.addressAllocator = cfg.AddressAllocator
+		s.allocStore = cfg.AllocationStore
+		logger.Info("DHCPv6 using integrated address allocator",
+			zap.String("pool", cfg.AddressAllocator.PoolID()),
+		)
+	} else if cfg.AddressPool != "" {
+		// Fall back to legacy pool
 		pool, err := NewAddressPool(cfg.AddressPool, preferredLifetime, validLifetime)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create address pool: %w", err)
@@ -146,8 +170,16 @@ func NewServer(cfg ServerConfig, logger *zap.Logger) (*Server, error) {
 		s.addressPool = pool
 	}
 
-	// Create prefix delegation pool
-	if cfg.PrefixPool != "" {
+	// Use integrated prefix allocator if provided (preferred)
+	if cfg.PrefixAllocator != nil {
+		s.prefixAllocator = cfg.PrefixAllocator
+		s.allocStore = cfg.AllocationStore
+		logger.Info("DHCPv6 using integrated prefix allocator",
+			zap.String("pool", cfg.PrefixAllocator.PoolID()),
+			zap.Int("prefix_length", cfg.PrefixAllocator.PrefixLength()),
+		)
+	} else if cfg.PrefixPool != "" {
+		// Fall back to legacy pool
 		delegationLen := cfg.DelegationLength
 		if delegationLen == 0 {
 			delegationLen = 60 // Default /60 delegation
@@ -624,15 +656,16 @@ func (s *Server) handleRelease(msg *Message, addr *net.UDPAddr) {
 	}
 
 	clientDUID := string(clientIDOpt.Data)
+	ctx := context.Background()
 
 	// Release lease
 	s.leasesMu.Lock()
 	if lease, ok := s.leases[clientDUID]; ok {
-		if s.addressPool != nil && lease.Address != nil {
-			s.addressPool.Release(clientDUID)
+		if lease.Address != nil {
+			s.releaseAddress(ctx, clientDUID)
 		}
-		if s.prefixPool != nil && lease.Prefix != nil {
-			s.prefixPool.Release(clientDUID)
+		if lease.Prefix != nil {
+			s.releasePrefix(ctx, clientDUID)
 		}
 		delete(s.leases, clientDUID)
 	}
@@ -716,25 +749,29 @@ func (s *Server) buildAdvertise(msg *Message, clientDUID string, clientAddr net.
 	})
 
 	// Handle IA_NA requests
+	ctx := context.Background()
 	for _, ianaOpt := range msg.GetAllOptions(OptIANA) {
 		iana, err := ParseIANA(ianaOpt.Data)
 		if err != nil {
 			continue
 		}
 
-		if s.addressPool != nil {
-			addr := s.addressPool.Allocate(clientDUID)
-			if addr != nil {
+		if s.hasAddressPool() {
+			addr, err := s.allocateAddress(ctx, clientDUID, iana.IAID)
+			if err == nil && addr != nil {
+				preferred := s.getPreferredLifetime()
+				valid := s.getValidLifetime()
+
 				iaAddr := &IAAddress{
 					Address:           addr,
-					PreferredLifetime: s.addressPool.preferredLifetime,
-					ValidLifetime:     s.addressPool.validLifetime,
+					PreferredLifetime: preferred,
+					ValidLifetime:     valid,
 				}
 
 				responseIANA := &IANA{
 					IAID: iana.IAID,
-					T1:   s.addressPool.preferredLifetime / 2,
-					T2:   s.addressPool.preferredLifetime * 4 / 5,
+					T1:   preferred / 2,
+					T2:   preferred * 4 / 5,
 					Options: []Option{
 						MakeIAAddressOption(iaAddr),
 					},
@@ -751,21 +788,24 @@ func (s *Server) buildAdvertise(msg *Message, clientDUID string, clientAddr net.
 			continue
 		}
 
-		if s.prefixPool != nil {
-			prefix := s.prefixPool.Allocate(clientDUID)
-			if prefix != nil {
+		if s.hasPrefixPool() {
+			prefix, err := s.allocatePrefix(ctx, clientDUID, iapd.IAID)
+			if err == nil && prefix != nil {
 				prefixLen, _ := prefix.Mask.Size()
+				preferred := s.getPreferredLifetime()
+				valid := s.getValidLifetime()
+
 				iaPrefix := &IAPrefix{
-					PreferredLifetime: s.prefixPool.preferredLifetime,
-					ValidLifetime:     s.prefixPool.validLifetime,
+					PreferredLifetime: preferred,
+					ValidLifetime:     valid,
 					PrefixLength:      uint8(prefixLen),
 					Prefix:            prefix.IP,
 				}
 
 				responseIAPD := &IAPD{
 					IAID: iapd.IAID,
-					T1:   s.prefixPool.preferredLifetime / 2,
-					T2:   s.prefixPool.preferredLifetime * 4 / 5,
+					T1:   preferred / 2,
+					T2:   preferred * 4 / 5,
 					Options: []Option{
 						MakeIAPrefixOption(iaPrefix),
 					},
@@ -812,32 +852,36 @@ func (s *Server) buildReply(msg *Message, clientDUID string, clientAddr net.IP) 
 	s.leasesMu.Unlock()
 
 	// Handle IA_NA
+	ctx := context.Background()
 	for _, ianaOpt := range msg.GetAllOptions(OptIANA) {
 		iana, err := ParseIANA(ianaOpt.Data)
 		if err != nil {
 			continue
 		}
 
-		if s.addressPool != nil {
-			addr := s.addressPool.Allocate(clientDUID)
-			if addr != nil {
+		if s.hasAddressPool() {
+			addr, allocErr := s.allocateAddress(ctx, clientDUID, iana.IAID)
+			if allocErr == nil && addr != nil {
+				preferred := s.getPreferredLifetime()
+				valid := s.getValidLifetime()
+
 				s.leasesMu.Lock()
 				lease.Address = addr
 				lease.IAID = iana.IAID
-				lease.PreferredEnd = time.Now().Add(time.Duration(s.addressPool.preferredLifetime) * time.Second)
-				lease.ValidEnd = time.Now().Add(time.Duration(s.addressPool.validLifetime) * time.Second)
+				lease.PreferredEnd = time.Now().Add(time.Duration(preferred) * time.Second)
+				lease.ValidEnd = time.Now().Add(time.Duration(valid) * time.Second)
 				s.leasesMu.Unlock()
 
 				iaAddr := &IAAddress{
 					Address:           addr,
-					PreferredLifetime: s.addressPool.preferredLifetime,
-					ValidLifetime:     s.addressPool.validLifetime,
+					PreferredLifetime: preferred,
+					ValidLifetime:     valid,
 				}
 
 				responseIANA := &IANA{
 					IAID: iana.IAID,
-					T1:   s.addressPool.preferredLifetime / 2,
-					T2:   s.addressPool.preferredLifetime * 4 / 5,
+					T1:   preferred / 2,
+					T2:   preferred * 4 / 5,
 					Options: []Option{
 						MakeIAAddressOption(iaAddr),
 					},
@@ -868,25 +912,28 @@ func (s *Server) buildReply(msg *Message, clientDUID string, clientAddr net.IP) 
 			continue
 		}
 
-		if s.prefixPool != nil {
-			prefix := s.prefixPool.Allocate(clientDUID)
-			if prefix != nil {
+		if s.hasPrefixPool() {
+			prefix, allocErr := s.allocatePrefix(ctx, clientDUID, iapd.IAID)
+			if allocErr == nil && prefix != nil {
+				preferred := s.getPreferredLifetime()
+				valid := s.getValidLifetime()
+
 				s.leasesMu.Lock()
 				lease.Prefix = prefix
 				s.leasesMu.Unlock()
 
 				prefixLen, _ := prefix.Mask.Size()
 				iaPrefix := &IAPrefix{
-					PreferredLifetime: s.prefixPool.preferredLifetime,
-					ValidLifetime:     s.prefixPool.validLifetime,
+					PreferredLifetime: preferred,
+					ValidLifetime:     valid,
 					PrefixLength:      uint8(prefixLen),
 					Prefix:            prefix.IP,
 				}
 
 				responseIAPD := &IAPD{
 					IAID: iapd.IAID,
-					T1:   s.prefixPool.preferredLifetime / 2,
-					T2:   s.prefixPool.preferredLifetime * 4 / 5,
+					T1:   preferred / 2,
+					T2:   preferred * 4 / 5,
 					Options: []Option{
 						MakeIAPrefixOption(iaPrefix),
 					},
@@ -990,4 +1037,150 @@ func GenerateDUID() *DUID {
 		Type: DUIDTypeLL,
 		Data: data,
 	}
+}
+
+// allocateAddress allocates an IPv6 address using either the integrated allocator
+// or the legacy pool, depending on configuration.
+func (s *Server) allocateAddress(ctx context.Context, clientDUID string, iaid uint32) (net.IP, error) {
+	// Prefer integrated allocator
+	if s.addressAllocator != nil {
+		// Use DUID as subscriber ID for DHCPv6
+		prefix, err := s.addressAllocator.AllocateWithOptions(ctx, allocator.AllocateOptions{
+			SubscriberID: clientDUID,
+			DUID:         clientDUID,
+			IAID:         iaid,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return prefix.IP, nil
+	}
+
+	// Fall back to legacy pool
+	if s.addressPool != nil {
+		addr := s.addressPool.Allocate(clientDUID)
+		if addr == nil {
+			return nil, fmt.Errorf("no addresses available")
+		}
+		return addr, nil
+	}
+
+	return nil, fmt.Errorf("no address pool configured")
+}
+
+// allocatePrefix allocates an IPv6 prefix using either the integrated allocator
+// or the legacy pool, depending on configuration.
+func (s *Server) allocatePrefix(ctx context.Context, clientDUID string, iaid uint32) (*net.IPNet, error) {
+	// Prefer integrated allocator
+	if s.prefixAllocator != nil {
+		prefix, err := s.prefixAllocator.AllocateWithOptions(ctx, allocator.AllocateOptions{
+			SubscriberID: clientDUID,
+			DUID:         clientDUID,
+			IAID:         iaid,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return prefix, nil
+	}
+
+	// Fall back to legacy pool
+	if s.prefixPool != nil {
+		prefix := s.prefixPool.Allocate(clientDUID)
+		if prefix == nil {
+			return nil, fmt.Errorf("no prefixes available")
+		}
+		return prefix, nil
+	}
+
+	return nil, fmt.Errorf("no prefix pool configured")
+}
+
+// releaseAddress releases an IPv6 address allocation.
+func (s *Server) releaseAddress(ctx context.Context, clientDUID string) {
+	if s.addressAllocator != nil {
+		if err := s.addressAllocator.Release(ctx, clientDUID); err != nil {
+			s.logger.Debug("Failed to release address from allocator",
+				zap.String("duid", clientDUID),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+
+	if s.addressPool != nil {
+		s.addressPool.Release(clientDUID)
+	}
+}
+
+// releasePrefix releases an IPv6 prefix allocation.
+func (s *Server) releasePrefix(ctx context.Context, clientDUID string) {
+	if s.prefixAllocator != nil {
+		if err := s.prefixAllocator.Release(ctx, clientDUID); err != nil {
+			s.logger.Debug("Failed to release prefix from allocator",
+				zap.String("duid", clientDUID),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+
+	if s.prefixPool != nil {
+		s.prefixPool.Release(clientDUID)
+	}
+}
+
+// hasAddressPool returns true if address allocation is configured.
+func (s *Server) hasAddressPool() bool {
+	return s.addressAllocator != nil || s.addressPool != nil
+}
+
+// hasPrefixPool returns true if prefix delegation is configured.
+func (s *Server) hasPrefixPool() bool {
+	return s.prefixAllocator != nil || s.prefixPool != nil
+}
+
+// getPreferredLifetime returns the preferred lifetime for allocations.
+func (s *Server) getPreferredLifetime() uint32 {
+	if s.addressAllocator != nil {
+		return s.preferredLifetime
+	}
+	if s.addressPool != nil {
+		return s.addressPool.preferredLifetime
+	}
+	if s.prefixAllocator != nil {
+		return s.preferredLifetime
+	}
+	if s.prefixPool != nil {
+		return s.prefixPool.preferredLifetime
+	}
+	return 3600 // Default 1 hour
+}
+
+// getValidLifetime returns the valid lifetime for allocations.
+func (s *Server) getValidLifetime() uint32 {
+	if s.addressAllocator != nil {
+		return s.validLifetime
+	}
+	if s.addressPool != nil {
+		return s.addressPool.validLifetime
+	}
+	if s.prefixAllocator != nil {
+		return s.validLifetime
+	}
+	if s.prefixPool != nil {
+		return s.prefixPool.validLifetime
+	}
+	return 7200 // Default 2 hours
+}
+
+// getPrefixLength returns the prefix length for prefix delegation.
+func (s *Server) getPrefixLength() int {
+	if s.prefixAllocator != nil {
+		return s.prefixAllocator.PrefixLength()
+	}
+	if s.prefixPool != nil {
+		return int(s.prefixPool.delegationLength)
+	}
+	return 60 // Default /60
 }
