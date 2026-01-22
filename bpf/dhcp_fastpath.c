@@ -250,6 +250,77 @@ static __always_inline __u8 get_dhcp_msg_type(void *dhcp_base, void *data_end) {
 }
 
 /* ========================================================================
+ * Issue #56: Fixed-Position Circuit-ID Extraction
+ *
+ * Extract circuit-ID from Option 82 at fixed positions only.
+ * This avoids variable-offset parsing that caused verifier issues.
+ * ======================================================================== */
+
+/* Extract circuit-ID from Option 82 at fixed positions (Issue #56)
+ * Returns 1 if found, 0 if not found
+ * Circuit-ID is copied to key->data (padded to 32 bytes)
+ *
+ * Checks common positions where Option 82 appears:
+ * - Position 3: After message type [53][1][x][82][len][...]
+ * - Positions 12-19: After common initial options
+ */
+static __always_inline int extract_circuit_id_fixed(void *dhcp_base,
+                                                     void *data_end,
+                                                     struct circuit_id_key *key) {
+	__u8 *opts = (__u8 *)dhcp_base + 240;
+
+	/* Zero the key first */
+	__builtin_memset(key, 0, sizeof(*key));
+
+	/* Check we have room for scanning */
+	if ((void *)(opts + 64) > data_end)
+		return 0;
+
+	/* Check fixed positions where Option 82 commonly appears */
+	/* Position 0: After message type [53][1][x][82][len][...] */
+	if (opts[3] == 82) {
+		__u8 opt82_len = opts[4];
+		if (opt82_len >= 4 && (void *)(opts + 5 + opt82_len) <= data_end) {
+			/* Parse sub-option 1 (circuit-id) at start of Option 82 */
+			if (opts[5] == 1) {
+				__u8 cid_len = opts[6];
+				if (cid_len > 0 && cid_len <= 32 &&
+				    (void *)(opts + 7 + cid_len) <= data_end) {
+					#pragma unroll
+					for (int i = 0; i < 32; i++) {
+						if (i < cid_len)
+							key->data[i] = opts[7 + i];
+					}
+					return 1;
+				}
+			}
+		}
+	}
+
+	/* Position after common options: check offset 12-20 range */
+	#pragma unroll
+	for (int pos = 12; pos < 20; pos++) {
+		if (opts[pos] == 82 && (void *)(opts + pos + 8) <= data_end) {
+			__u8 opt82_len = opts[pos + 1];
+			if (opt82_len >= 4 && opts[pos + 2] == 1) {
+				__u8 cid_len = opts[pos + 3];
+				if (cid_len > 0 && cid_len <= 32 &&
+				    (void *)(opts + pos + 4 + cid_len) <= data_end) {
+					#pragma unroll
+					for (int i = 0; i < 32; i++) {
+						if (i < cid_len)
+							key->data[i] = opts[pos + 4 + i];
+					}
+					return 1;
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+/* ========================================================================
  * Issue #17: L2 Header Construction for XDP_TX
  *
  * Proper handling of:
@@ -574,7 +645,8 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 	/* Lookup subscriber in cache
 	 * Strategy:
 	 * 1. If packet has VLAN tags, try VLAN-based lookup first (QinQ mode)
-	 * 2. Fall back to MAC-based lookup
+	 * 2. Try circuit-ID lookup from Option 82 (Issue #56)
+	 * 3. Fall back to MAC-based lookup
 	 */
 	struct pool_assignment *assignment = NULL;
 
@@ -587,7 +659,21 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 		assignment = bpf_map_lookup_elem(&vlan_subscriber_pools, &vkey);
 	}
 
-	/* If no VLAN match, try MAC lookup */
+	/* Try circuit-ID lookup if Option 82 is present (Issue #56)
+	 * This allows subscriber identification by relay agent circuit-ID
+	 * without variable-length hashing that caused verifier issues.
+	 */
+	if (!assignment) {
+		struct circuit_id_key cid_key;
+		if (extract_circuit_id_fixed((void *)pkt.dhcp, pkt.data_end, &cid_key)) {
+			assignment = bpf_map_lookup_elem(&circuit_id_subscribers, &cid_key);
+			if (assignment) {
+				update_stat(STAT_OPTION82_PRESENT);
+			}
+		}
+	}
+
+	/* If no circuit-ID match, try MAC lookup */
 	if (!assignment) {
 		assignment = lookup_subscriber(pkt.dhcp);
 	}

@@ -202,4 +202,35 @@ struct {
 	__type(value, __u64); /* MAC address to use for subscriber lookup */
 } circuit_id_map SEC(".maps");
 
+/* ========================================================================
+ * Fixed-Size Circuit-ID Subscriber Lookup (Issue #56)
+ *
+ * Re-implemented Option 82 circuit-ID support using fixed-size keys
+ * to avoid eBPF verifier issues with variable-length hashing loops.
+ * ======================================================================== */
+
+/* Fixed-size circuit-ID key for direct lookup (Issue #56)
+ * Circuit-IDs longer than 32 bytes are truncated
+ * Shorter circuit-IDs are zero-padded
+ */
+#define CIRCUIT_ID_KEY_LEN 32
+
+struct circuit_id_key {
+	__u8 data[CIRCUIT_ID_KEY_LEN];
+} __attribute__((packed));
+
+/* Circuit-ID to pool assignment direct mapping (Issue #56)
+ * Key: Fixed 32-byte circuit-id (padded/truncated)
+ * Value: pool_assignment struct (same as subscriber_pools)
+ *
+ * Populated by slow path when Option 82 is seen.
+ * Enables fast-path lookup by circuit-ID without hashing.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_SUBSCRIBERS);
+	__type(key, struct circuit_id_key);
+	__type(value, struct pool_assignment);
+} circuit_id_subscribers SEC(".maps");
+
 #endif /* __MAPS_H__ */

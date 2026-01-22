@@ -75,14 +75,15 @@ type Loader struct {
 	xdpMode link.XDPAttachFlags
 
 	// eBPF resources
-	collection          *ebpf.Collection
-	xdpLink             link.Link
-	subscriberPools     *ebpf.Map
-	vlanSubscriberPools *ebpf.Map // QinQ VLAN-based subscriber lookup
-	ipPools             *ebpf.Map
-	statsMap            *ebpf.Map
-	serverConfigMap     *ebpf.Map
-	circuitIDMap        *ebpf.Map // Issue #15: Circuit-ID to MAC mapping
+	collection           *ebpf.Collection
+	xdpLink              link.Link
+	subscriberPools      *ebpf.Map
+	vlanSubscriberPools  *ebpf.Map // QinQ VLAN-based subscriber lookup
+	ipPools              *ebpf.Map
+	statsMap             *ebpf.Map
+	serverConfigMap      *ebpf.Map
+	circuitIDMap         *ebpf.Map // Issue #15: Circuit-ID to MAC mapping (hash-based)
+	circuitIDSubscribers *ebpf.Map // Issue #56: Circuit-ID to pool_assignment (fixed-size key)
 }
 
 // LoaderOption configures the Loader
@@ -205,6 +206,16 @@ func (l *Loader) Load(ctx context.Context) error {
 	l.circuitIDMap = coll.Maps["circuit_id_map"]
 	if l.circuitIDMap == nil {
 		l.logger.Warn("circuit_id_map not found - Option 82 circuit-id lookup disabled")
+	}
+
+	// Issue #56: Circuit-ID subscribers map (fixed-size key for verifier-safe lookup)
+	// This map uses a fixed 32-byte key for direct circuit-ID to pool_assignment lookup,
+	// avoiding the hashing loop that caused verifier issues in Issue #31.
+	l.circuitIDSubscribers = coll.Maps["circuit_id_subscribers"]
+	if l.circuitIDSubscribers == nil {
+		l.logger.Warn("circuit_id_subscribers not found - fixed-size circuit-id lookup disabled")
+	} else {
+		l.logger.Info("Circuit-ID subscriber map loaded (Issue #56)")
 	}
 
 	// Initialize stats map with zeroed entry
@@ -500,6 +511,59 @@ func (l *Loader) GetCircuitIDMapping(circuitID []byte) (uint64, error) {
 		return 0, err
 	}
 	return mac, nil
+}
+
+// === Circuit-ID Subscriber Map Operations (Issue #56) ===
+
+// CircuitIDKeyLen must match CIRCUIT_ID_KEY_LEN in maps.h
+const CircuitIDKeyLen = 32
+
+// CircuitIDKey is the fixed-size key for circuit_id_subscribers map
+type CircuitIDKey [CircuitIDKeyLen]byte
+
+// MakeCircuitIDKey creates a fixed-size key from a circuit-ID
+// Pads with zeros if shorter than 32 bytes, truncates if longer
+func MakeCircuitIDKey(circuitID []byte) CircuitIDKey {
+	var key CircuitIDKey
+	copy(key[:], circuitID)
+	return key
+}
+
+// AddCircuitIDSubscriber adds a circuit-ID to pool_assignment mapping
+// This enables fast-path lookup by circuit-ID (Issue #56)
+func (l *Loader) AddCircuitIDSubscriber(circuitID []byte, assignment *PoolAssignment) error {
+	if l.circuitIDSubscribers == nil {
+		return fmt.Errorf("circuit_id_subscribers map not loaded")
+	}
+	key := MakeCircuitIDKey(circuitID)
+	return l.circuitIDSubscribers.Put(&key, assignment)
+}
+
+// RemoveCircuitIDSubscriber removes a circuit-ID subscriber mapping
+func (l *Loader) RemoveCircuitIDSubscriber(circuitID []byte) error {
+	if l.circuitIDSubscribers == nil {
+		return fmt.Errorf("circuit_id_subscribers map not loaded")
+	}
+	key := MakeCircuitIDKey(circuitID)
+	return l.circuitIDSubscribers.Delete(&key)
+}
+
+// GetCircuitIDSubscriber looks up pool assignment by circuit-ID
+func (l *Loader) GetCircuitIDSubscriber(circuitID []byte) (*PoolAssignment, error) {
+	if l.circuitIDSubscribers == nil {
+		return nil, fmt.Errorf("circuit_id_subscribers map not loaded")
+	}
+	key := MakeCircuitIDKey(circuitID)
+	var assignment PoolAssignment
+	if err := l.circuitIDSubscribers.Lookup(&key, &assignment); err != nil {
+		return nil, err
+	}
+	return &assignment, nil
+}
+
+// HasCircuitIDSubscriberSupport returns true if the circuit_id_subscribers map is loaded
+func (l *Loader) HasCircuitIDSubscriberSupport() bool {
+	return l.circuitIDSubscribers != nil
 }
 
 // === Helper Functions ===

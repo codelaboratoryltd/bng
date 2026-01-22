@@ -556,20 +556,46 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		)
 	}
 
-	// Issue #15: Add circuit-id mapping for fast path lookup
+	// Issue #15: Add circuit-id to MAC mapping for fast path lookup (legacy hash-based)
 	if lease.CircuitID != nil && len(lease.CircuitID) > 0 && s.loader != nil {
 		macU64 := ebpf.MACToUint64(mac)
 		if err := s.loader.AddCircuitIDMapping(lease.CircuitID, macU64); err != nil {
-			s.logger.Warn("Failed to add circuit-id mapping to eBPF",
+			s.logger.Warn("Failed to add circuit-id to MAC mapping to eBPF",
 				zap.String("mac", mac.String()),
 				zap.String("circuit_id", string(lease.CircuitID)),
 				zap.Error(err),
 			)
 		} else {
-			s.logger.Debug("Added circuit-id mapping for fast path",
+			s.logger.Debug("Added circuit-id to MAC mapping for fast path",
 				zap.String("mac", mac.String()),
 				zap.String("circuit_id", string(lease.CircuitID)),
 			)
+		}
+
+		// Issue #56: Add circuit-id subscriber mapping for direct fast path lookup
+		// This uses fixed-size keys to avoid verifier issues with hashing loops
+		if s.loader.HasCircuitIDSubscriberSupport() {
+			assignment := &ebpf.PoolAssignment{
+				PoolID:      lease.PoolID,
+				AllocatedIP: ebpf.IPToUint32(lease.IP),
+				VlanID:      pool.VlanID,
+				ClientClass: uint8(pool.ClientClass),
+				LeaseExpiry: uint64(lease.ExpiresAt.Unix()),
+				Flags:       0,
+			}
+			if err := s.loader.AddCircuitIDSubscriber(lease.CircuitID, assignment); err != nil {
+				s.logger.Warn("Failed to add circuit-id subscriber mapping",
+					zap.String("mac", mac.String()),
+					zap.String("circuit_id", string(lease.CircuitID)),
+					zap.Error(err),
+				)
+			} else {
+				s.logger.Debug("Added circuit-id subscriber mapping for fast path (Issue #56)",
+					zap.String("mac", mac.String()),
+					zap.String("circuit_id", string(lease.CircuitID)),
+					zap.String("ip", lease.IP.String()),
+				)
+			}
 		}
 	}
 
@@ -745,14 +771,25 @@ func (s *Server) handleRelease(req *dhcpv4.DHCPv4) {
 			}
 		}
 
-		// Issue #15: Remove circuit-id mapping if present
+		// Issue #15: Remove circuit-id to MAC mapping if present
 		if lease.CircuitID != nil && len(lease.CircuitID) > 0 {
 			if err := s.loader.RemoveCircuitIDMapping(lease.CircuitID); err != nil {
-				s.logger.Warn("Failed to remove circuit-id mapping",
+				s.logger.Warn("Failed to remove circuit-id to MAC mapping",
 					zap.String("mac", mac.String()),
 					zap.String("circuit_id", string(lease.CircuitID)),
 					zap.Error(err),
 				)
+			}
+
+			// Issue #56: Remove circuit-id subscriber mapping
+			if s.loader.HasCircuitIDSubscriberSupport() {
+				if err := s.loader.RemoveCircuitIDSubscriber(lease.CircuitID); err != nil {
+					s.logger.Warn("Failed to remove circuit-id subscriber mapping",
+						zap.String("mac", mac.String()),
+						zap.String("circuit_id", string(lease.CircuitID)),
+						zap.Error(err),
+					)
+				}
 			}
 		}
 
