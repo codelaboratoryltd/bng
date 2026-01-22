@@ -129,6 +129,12 @@ func (h *ALGHandler) GetDynamicMapping(privateIP net.IP, privatePort uint16, pro
 }
 
 // FTPALG handles FTP Application Layer Gateway
+// TODO: This is a placeholder implementation. For production use, the following is needed:
+// - Proper port allocation from subscriber's port block instead of simple offset
+// - Full FTP command parsing with proper state machine
+// - Support for multi-line FTP responses
+// - Timeout handling for dynamic mappings
+// - Thread-safe port allocation with atomic operations
 type FTPALG struct {
 	handler *ALGHandler
 	logger  *zap.Logger
@@ -336,6 +342,14 @@ func (f *FTPALG) createDataConnectionMapping(conn *ALGConnection, dataIP net.IP,
 // SIPALG handles SIP Application Layer Gateway
 // Note: SIP ALG is controversial and often causes issues with modern VoIP
 // Consider disabling by default as most SIP implementations use STUN/TURN/ICE
+// TODO: This is a placeholder implementation. For production use, the following is needed:
+// - Proper SIP message parsing (RFC 3261) instead of simple string replacement
+// - Full SDP parsing (RFC 4566) for media port extraction
+// - Proper port allocation from subscriber's port block for RTP/RTCP streams
+// - Support for SIP over TCP and TLS (currently only basic UDP parsing)
+// - Via header manipulation with proper branch parameter handling
+// - Record-Route header support for dialog routing
+// - SIP registration binding management
 type SIPALG struct {
 	handler *ALGHandler
 	logger  *zap.Logger

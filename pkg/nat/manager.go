@@ -676,9 +676,19 @@ func (m *Manager) cleanupExpiredSessions() {
 
 // readLogRingBuffer reads NAT log events from the eBPF ring buffer
 func (m *Manager) readLogRingBuffer(ctx context.Context) {
-	// Ring buffer reading requires cilium/ebpf ringbuf reader
-	// This is a placeholder for the actual implementation
-	m.logger.Info("NAT log ring buffer reader started")
+	// TODO: Implement ring buffer reading using ringbuf.NewReader() from cilium/ebpf.
+	// Example implementation:
+	//   reader, err := ringbuf.NewReader(m.natLogRB)
+	//   if err != nil { ... }
+	//   defer reader.Close()
+	//   for {
+	//       record, err := reader.Read()
+	//       if err != nil { ... }
+	//       var entry BPFLogEntry
+	//       if err := binary.Read(bytes.NewReader(record.RawSample), binary.LittleEndian, &entry); err != nil { ... }
+	//       m.natLogger.LogFromBPF(&entry)
+	//   }
+	m.logger.Info("NAT log ring buffer reader started (placeholder - needs ringbuf.NewReader() implementation)")
 }
 
 // Stop cleans up resources

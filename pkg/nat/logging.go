@@ -527,12 +527,14 @@ func (l *Logger) writeWithRotation(data []byte) {
 		return
 	}
 
-	// Check if rotation is needed
+	// Check if rotation is needed - move size check inside lock to prevent race
 	if l.maxFileSize > 0 && l.currentFile != nil {
+		l.rotationMu.Lock()
 		l.currentSize += int64(len(data))
 		if l.currentSize >= l.maxFileSize {
-			l.rotateFile()
+			l.rotateFileLocked() // renamed to indicate lock is held
 		}
+		l.rotationMu.Unlock()
 	}
 
 	if _, err := l.writer.Write(data); err != nil {
@@ -540,11 +542,9 @@ func (l *Logger) writeWithRotation(data []byte) {
 	}
 }
 
-// rotateFile performs log file rotation
-func (l *Logger) rotateFile() {
-	l.rotationMu.Lock()
-	defer l.rotationMu.Unlock()
-
+// rotateFileLocked performs log file rotation
+// MUST be called with rotationMu held
+func (l *Logger) rotateFileLocked() {
 	if l.currentFile == nil {
 		return
 	}

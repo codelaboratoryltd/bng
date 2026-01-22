@@ -399,7 +399,8 @@ static __always_inline void update_csum16(__u16 *csum, __u16 old_val, __u16 new_
 
 /* Allocate a port from subscriber's port block (RFC 6431) */
 static __always_inline __u16 allocate_port_from_block(struct port_block *block, __u8 preserve_parity, __u16 orig_port) {
-	__u16 port = block->next_port;
+	/* Use atomic fetch-and-add for port allocation to ensure atomicity */
+	__u16 port = __sync_fetch_and_add(&block->next_port, 1);
 	__u16 start_port = port;
 	__u16 block_size = block->port_end - block->port_start + 1;
 
@@ -414,14 +415,37 @@ static __always_inline __u16 allocate_port_from_block(struct port_block *block, 
 
 		/* Check parity if required */
 		if (preserve_parity && ((port & 1) != orig_parity)) {
-			port++;
+			port = __sync_fetch_and_add(&block->next_port, 1);
 			continue;
 		}
 
-		/* Found a candidate port */
-		block->next_port = port + 1;
-		if (block->next_port > block->port_end)
-			block->next_port = block->port_start;
+		/* Check if port is already in use by looking up session map */
+		struct nat_key check_key = {
+			.src_ip = 0,  /* Will match any source */
+			.dst_ip = 0,
+			.src_port = bpf_htons(port),
+			.dst_port = 0,
+			.protocol = 0,
+		};
+		/* Note: In a full implementation, we would check the EIM table
+		 * or maintain a separate port bitmap for faster lookups */
+		struct eim_key eim_check = {
+			.internal_ip = 0,
+			.internal_port = port,
+			.protocol = 0,
+		};
+		struct eim_mapping *existing = bpf_map_lookup_elem(&eim_table, &eim_check);
+		if (existing != NULL) {
+			/* Port already in use, try next */
+			port = __sync_fetch_and_add(&block->next_port, 1);
+			continue;
+		}
+
+		/* Found an available port */
+		/* Wrap next_port if needed */
+		if (block->next_port > block->port_end) {
+			__sync_val_compare_and_swap(&block->next_port, block->next_port, block->port_start);
+		}
 
 		return port;
 	}
