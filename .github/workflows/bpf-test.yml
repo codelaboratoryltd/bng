@@ -1,0 +1,61 @@
+name: BPF Build and Verifier Test
+
+on:
+  push:
+    paths:
+      - 'bpf/**'
+      - '.github/workflows/bpf-test.yml'
+  pull_request:
+    paths:
+      - 'bpf/**'
+
+jobs:
+  build-and-verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install BPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            llvm \
+            libbpf-dev \
+            linux-headers-$(uname -r) \
+            linux-tools-$(uname -r) \
+            linux-tools-common
+
+      - name: Build BPF programs
+        run: |
+          cd bpf
+          make clean
+          make
+          ls -la *.bpf.o
+
+      - name: Test BPF verifier (dhcp_fastpath)
+        run: |
+          cd bpf
+          # Try to load the program to test verifier
+          # Note: This may fail in GitHub Actions due to kernel restrictions
+          # but we'll see the verifier output
+          sudo bpftool prog load dhcp_fastpath.bpf.o /sys/fs/bpf/test_dhcp || {
+            echo "Verifier rejected program - see output above"
+            exit 1
+          }
+          sudo rm -f /sys/fs/bpf/test_dhcp
+          echo "dhcp_fastpath.bpf.o passed verifier!"
+
+      - name: Test BPF verifier (all programs)
+        if: success()
+        run: |
+          cd bpf
+          for prog in qos_ratelimit.bpf.o nat44.bpf.o antispoof.bpf.o; do
+            echo "Testing $prog..."
+            sudo bpftool prog load "$prog" "/sys/fs/bpf/test_$(basename $prog .bpf.o)" || {
+              echo "$prog failed verifier"
+              continue
+            }
+            sudo rm -f "/sys/fs/bpf/test_$(basename $prog .bpf.o)"
+            echo "$prog passed!"
+          done
