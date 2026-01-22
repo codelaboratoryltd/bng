@@ -254,9 +254,27 @@ func NewPrefixPool(cidr string, delegationLen uint8, preferred, valid uint32) (*
 		copy(prefix, baseIP)
 
 		// Calculate the prefix for this index
-		prefixIndex := uint64(i) << (128 - int(delegationLen))
-		for j := 0; j < 8; j++ {
-			prefix[8+j] |= byte(prefixIndex >> (56 - j*8))
+		// The index bits need to be placed at the boundary between the base prefix
+		// and the delegation length. For example, /48 to /56 means 8 bits of indexing
+		// starting at bit position 48.
+		indexBits := int(delegationLen) - ones
+		byteOffset := ones / 8
+		bitOffset := ones % 8
+
+		// Set the index bits in the prefix
+		idx := uint64(i)
+		for b := 0; b < (indexBits+7)/8; b++ {
+			bytePos := byteOffset + b
+			if bytePos >= 16 {
+				break
+			}
+			// Calculate which bits of the index go into this byte
+			shift := indexBits - (b+1)*8 + bitOffset
+			if shift >= 0 {
+				prefix[bytePos] |= byte(idx >> shift)
+			} else {
+				prefix[bytePos] |= byte(idx << (-shift))
+			}
 		}
 
 		pool.available = append(pool.available, &net.IPNet{

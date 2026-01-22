@@ -429,3 +429,164 @@ var _ = Describe("DHCPv6 Protocol", func() {
 		})
 	})
 })
+
+// Server tests (Issue #26)
+var _ = Describe("DHCPv6 Server", func() {
+
+	Describe("AddressPool", func() {
+
+		Context("when creating a new address pool", func() {
+			It("should create a pool from valid CIDR", func() {
+				pool, err := dhcpv6.NewAddressPool("2001:db8:1::/64", 3600, 7200)
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pool).NotTo(BeNil())
+			})
+
+			It("should return error for invalid CIDR", func() {
+				pool, err := dhcpv6.NewAddressPool("invalid", 3600, 7200)
+
+				Expect(err).To(HaveOccurred())
+				Expect(pool).To(BeNil())
+			})
+		})
+
+		Context("when allocating addresses", func() {
+			var pool *dhcpv6.AddressPool
+
+			BeforeEach(func() {
+				var err error
+				pool, err = dhcpv6.NewAddressPool("2001:db8:1::/120", 3600, 7200)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should allocate unique addresses to different clients", func() {
+				ip1 := pool.Allocate("client1")
+				ip2 := pool.Allocate("client2")
+
+				Expect(ip1).NotTo(BeNil())
+				Expect(ip2).NotTo(BeNil())
+				Expect(ip1.String()).NotTo(Equal(ip2.String()))
+			})
+
+			It("should return same address for same client", func() {
+				ip1 := pool.Allocate("client1")
+				ip2 := pool.Allocate("client1")
+
+				Expect(ip1.String()).To(Equal(ip2.String()))
+			})
+
+			It("should release and reallocate addresses", func() {
+				ip1 := pool.Allocate("client1")
+				pool.Release("client1")
+				ip2 := pool.Allocate("client2")
+
+				// Released IP should be available for reallocation
+				Expect(ip1).NotTo(BeNil())
+				Expect(ip2).NotTo(BeNil())
+			})
+		})
+	})
+
+	Describe("PrefixPool", func() {
+
+		Context("when creating a new prefix pool", func() {
+			It("should create a pool from valid CIDR with valid delegation length", func() {
+				pool, err := dhcpv6.NewPrefixPool("2001:db8::/48", 60, 3600, 7200)
+
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pool).NotTo(BeNil())
+			})
+
+			It("should return error for invalid CIDR", func() {
+				pool, err := dhcpv6.NewPrefixPool("invalid", 60, 3600, 7200)
+
+				Expect(err).To(HaveOccurred())
+				Expect(pool).To(BeNil())
+			})
+
+			It("should return error if delegation length is smaller than pool prefix", func() {
+				pool, err := dhcpv6.NewPrefixPool("2001:db8::/48", 40, 3600, 7200)
+
+				Expect(err).To(HaveOccurred())
+				Expect(pool).To(BeNil())
+			})
+		})
+
+		Context("when allocating prefixes", func() {
+			var pool *dhcpv6.PrefixPool
+
+			BeforeEach(func() {
+				var err error
+				pool, err = dhcpv6.NewPrefixPool("2001:db8::/48", 56, 3600, 7200)
+				Expect(err).NotTo(HaveOccurred())
+			})
+
+			It("should allocate unique prefixes to different clients", func() {
+				p1 := pool.Allocate("client1")
+				p2 := pool.Allocate("client2")
+
+				Expect(p1).NotTo(BeNil())
+				Expect(p2).NotTo(BeNil())
+				Expect(p1.String()).NotTo(Equal(p2.String()))
+			})
+
+			It("should return same prefix for same client", func() {
+				p1 := pool.Allocate("client1")
+				p2 := pool.Allocate("client1")
+
+				Expect(p1.String()).To(Equal(p2.String()))
+			})
+
+			It("should allocate prefixes with correct delegation length", func() {
+				p := pool.Allocate("client1")
+
+				Expect(p).NotTo(BeNil())
+				ones, _ := p.Mask.Size()
+				Expect(ones).To(Equal(56))
+			})
+
+			It("should release and reallocate prefixes", func() {
+				p1 := pool.Allocate("client1")
+				pool.Release("client1")
+				p2 := pool.Allocate("client2")
+
+				Expect(p1).NotTo(BeNil())
+				Expect(p2).NotTo(BeNil())
+			})
+		})
+	})
+
+	Describe("Server Configuration", func() {
+
+		Context("when creating a server", func() {
+			It("should require interface parameter", func() {
+				_, err := dhcpv6.NewServer(dhcpv6.ServerConfig{
+					Interface: "",
+				}, nil)
+
+				Expect(err).To(HaveOccurred())
+				Expect(err.Error()).To(ContainSubstring("interface required"))
+			})
+		})
+	})
+
+	Describe("DUID Generation", func() {
+
+		It("should generate valid random DUID", func() {
+			duid := dhcpv6.GenerateDUID()
+
+			Expect(duid).NotTo(BeNil())
+			Expect(duid.Type).To(Equal(uint16(dhcpv6.DUIDTypeLL)))
+			Expect(len(duid.Data)).To(BeNumerically(">=", 8))
+		})
+
+		It("should generate unique DUIDs", func() {
+			duid1 := dhcpv6.GenerateDUID()
+			duid2 := dhcpv6.GenerateDUID()
+
+			// DUIDs should be different (with very high probability)
+			Expect(string(duid1.Serialize())).NotTo(Equal(string(duid2.Serialize())))
+		})
+	})
+})
