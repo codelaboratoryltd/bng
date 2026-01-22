@@ -330,6 +330,18 @@ func StandardRetentionPolicies() map[string]int {
 
 		// System events - 30 days
 		"system": 30,
+
+		// Device registration - 1 year
+		"device": 365,
+
+		// API access logs - 1 year (security audit requirement)
+		"api": 365,
+
+		// Security events - 2 years (compliance requirement)
+		"security": 730,
+
+		// Resource allocation - 1 year
+		"resource": 365,
 	}
 }
 
