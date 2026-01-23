@@ -23,13 +23,13 @@ COPY bpf/ .
 RUN make clean && make
 
 # Stage 2: Build Go application
-FROM golang:1.21-alpine AS go-builder
+FROM golang:1.25-alpine AS go-builder
 
 WORKDIR /build
 
 # Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=ssh go mod download
 
 # Copy source code
 COPY cmd/ cmd/
