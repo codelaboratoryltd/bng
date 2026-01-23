@@ -250,7 +250,7 @@ VPP is the right choice for core aggregation (100+ Gbps), but eBPF/XDP is simple
 
 ## Related Projects
 
-- [Nexus](../nexus) - Central coordination server (CLSet CRDT)
+- [Nexus](https://github.com/codelaboratoryltd/nexus) - Central coordination server (CLSet CRDT)
 - [FRR](https://frrouting.org/) - Routing suite for BGP
 - [cilium/ebpf](https://github.com/cilium/ebpf) - eBPF Go library
 
