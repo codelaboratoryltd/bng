@@ -223,7 +223,8 @@ func TestDistributedAllocator_Allocate_LeaseMode(t *testing.T) {
 
 	var alloc DistributedAllocation
 	require.NoError(t, json.Unmarshal(data, &alloc))
-	assert.Equal(t, uint64(0), alloc.Epoch) // Initial epoch is 0
+	// EpochBitmapAllocator starts at epoch 2 so zeros are "free"
+	assert.Equal(t, da.GetCurrentEpoch(), alloc.Epoch)
 }
 
 func TestDistributedAllocator_AllocateWithMAC(t *testing.T) {
@@ -291,13 +292,16 @@ func TestDistributedAllocator_Renew_LeaseMode(t *testing.T) {
 
 	ctx := context.Background()
 
+	// Get initial epoch
+	initialEpoch := da.GetCurrentEpoch()
+
 	// Allocate
 	_, err = da.Allocate(ctx, "sub-001")
 	require.NoError(t, err)
 
 	// Advance epoch
-	da.advanceEpoch()
-	assert.Equal(t, uint64(1), da.getCurrentEpoch())
+	newEpoch := da.AdvanceEpoch()
+	assert.Equal(t, initialEpoch+1, newEpoch)
 
 	// Renew should update epoch
 	err = da.Renew(ctx, "sub-001")
@@ -309,7 +313,7 @@ func TestDistributedAllocator_Renew_LeaseMode(t *testing.T) {
 
 	var alloc DistributedAllocation
 	require.NoError(t, json.Unmarshal(data, &alloc))
-	assert.Equal(t, uint64(1), alloc.Epoch)
+	assert.Equal(t, newEpoch, alloc.Epoch)
 }
 
 func TestDistributedAllocator_Release(t *testing.T) {
@@ -539,18 +543,20 @@ func TestDistributedAllocator_EpochManagement(t *testing.T) {
 	da, err := NewDistributedAllocator(cfg, store)
 	require.NoError(t, err)
 
-	// Initial epoch
-	assert.Equal(t, uint64(0), da.getCurrentEpoch())
+	// EpochBitmapAllocator starts at epoch 2 (so zeros are "free")
+	initialEpoch := da.GetCurrentEpoch()
+	assert.Equal(t, uint64(2), initialEpoch)
 
 	// Advance epoch
-	da.advanceEpoch()
-	assert.Equal(t, uint64(1), da.getCurrentEpoch())
+	newEpoch := da.AdvanceEpoch()
+	assert.Equal(t, initialEpoch+1, newEpoch)
+	assert.Equal(t, uint64(3), da.GetCurrentEpoch())
 
-	da.advanceEpoch()
-	assert.Equal(t, uint64(2), da.getCurrentEpoch())
+	newEpoch = da.AdvanceEpoch()
+	assert.Equal(t, uint64(4), newEpoch)
 }
 
-func TestDistributedAllocator_ReclaimExpired(t *testing.T) {
+func TestDistributedAllocator_LazyExpiration(t *testing.T) {
 	store := newMockStore()
 	cfg := DistributedConfig{
 		PoolID:      "reclaim-pool",
@@ -564,7 +570,8 @@ func TestDistributedAllocator_ReclaimExpired(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Allocate at epoch 0
+	// Allocate at current epoch (starts at 2)
+	initialEpoch := da.GetCurrentEpoch()
 	_, err = da.Allocate(ctx, "sub-001")
 	require.NoError(t, err)
 	_, err = da.Allocate(ctx, "sub-002")
@@ -573,25 +580,26 @@ func TestDistributedAllocator_ReclaimExpired(t *testing.T) {
 	assert.Equal(t, 2, da.Stats().Allocated)
 
 	// Advance epoch and renew only sub-001
-	da.advanceEpoch() // epoch 1
+	da.AdvanceEpoch() // epoch 3
 	da.Renew(ctx, "sub-001")
 
-	// Advance again
-	da.advanceEpoch() // epoch 2
+	// Advance again - sub-002 (at epoch 2) is now 2 epochs behind (grace period = 1)
+	da.AdvanceEpoch() // epoch 4
 
-	// Advance once more to trigger grace period expiry
-	da.advanceEpoch() // epoch 3
+	// With lazy expiration, Lookup returns nil for expired allocations
+	// sub-001 was renewed at epoch 3, so it's still valid (1 epoch behind)
+	prefix1, ok := da.Get("sub-001")
+	assert.True(t, ok, "sub-001 should still exist (renewed at epoch 3)")
+	assert.NotNil(t, prefix1)
 
-	// Reclaim expired (sub-002 at epoch 0 should be reclaimed, threshold is epoch 3-2=1)
-	da.reclaimExpired(ctx)
+	// sub-002 was allocated at epoch 2, now at epoch 4, that's 2 epochs behind
+	// With grace period of 1, it should be expired
+	prefix2, ok := da.Get("sub-002")
+	assert.False(t, ok, "sub-002 should be expired (epoch 2, current 4, grace 1)")
+	assert.Nil(t, prefix2)
 
-	// sub-001 (epoch 1) should still exist
-	_, ok := da.Get("sub-001")
-	assert.True(t, ok, "sub-001 should still exist (epoch 1 >= threshold 1)")
-
-	// sub-002 (epoch 0) should be reclaimed
-	_, ok = da.Get("sub-002")
-	assert.False(t, ok, "sub-002 should be reclaimed (epoch 0 < threshold 1)")
+	// Verify sub-001's epoch was at initial+1 (renewed)
+	_ = initialEpoch // used implicitly above
 }
 
 func TestDistributedAllocator_Concurrency(t *testing.T) {

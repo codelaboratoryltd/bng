@@ -85,6 +85,16 @@ var (
 	natLogEnabled  bool
 	natLogPath     string
 
+	// Advanced NAT44 configuration (Issue #67)
+	natInsideInterface  string // Inside interface for NAT (subscriber-facing)
+	natOutsideInterface string // Outside interface for NAT (public-facing)
+	natEIM              bool   // Endpoint-Independent Mapping (RFC 4787)
+	natEIF              bool   // Endpoint-Independent Filtering (RFC 4787)
+	natHairpin          bool   // Enable hairpinning for internal-to-internal NAT traffic
+	natALGFTP           bool   // Enable FTP ALG
+	natALGSIP           bool   // Enable SIP ALG
+	natBulkLogging      bool   // Enable RFC 6908 bulk logging format
+
 	// Device authentication configuration
 	authMode           string
 	authPSK            string
@@ -132,6 +142,28 @@ var (
 	haPeerURL    string // HA peer URL for P2P state sync
 	haRole       string // HA role: active or standby
 	haListenAddr string // HA sync listen address
+
+	// Resilience configuration (Issue #65)
+	healthCheckInterval time.Duration // Interval for checking Nexus/peer health
+	healthCheckRetries  int           // Number of failed checks before declaring partition
+	radiusPartitionMode string        // Behavior during RADIUS unavailability: reject, cached, allow
+	shortLeaseEnabled   bool          // Enable short leases when pool utilization is high
+	shortLeaseThreshold float64       // Pool utilization threshold to trigger short leases (0.0-1.0)
+	shortLeaseDuration  time.Duration // Duration of short leases
+
+	// TTL/Epoch lease mode configuration (Issue #66)
+	poolMode    string        // Allocation mode: static or lease
+	epochPeriod time.Duration // Duration of each epoch for lease mode
+	epochGrace  int           // Number of grace epochs before reclaiming IPs
+
+	// PPPoE configuration
+	pppoeEnabled        bool          // Enable PPPoE server
+	pppoeInterface      string        // Interface for PPPoE (defaults to main interface)
+	pppoeACName         string        // Access Concentrator name
+	pppoeServiceName    string        // Service name to advertise
+	pppoeAuthType       string        // Authentication type: pap, chap, or both
+	pppoeSessionTimeout time.Duration // Session idle timeout
+	pppoeMRU            uint16        // Maximum Receive Unit
 )
 
 func init() {
@@ -187,6 +219,24 @@ func init() {
 		"Enable NAT translation logging (required for legal compliance)")
 	runCmd.Flags().StringVar(&natLogPath, "nat-log-path", "",
 		"Path to NAT log file (empty for stdout)")
+
+	// Advanced NAT44 flags (Issue #67)
+	runCmd.Flags().StringVar(&natInsideInterface, "nat-inside-interface", "",
+		"Inside interface for NAT (subscriber-facing, defaults to main interface)")
+	runCmd.Flags().StringVar(&natOutsideInterface, "nat-outside-interface", "",
+		"Outside interface for NAT (public-facing, defaults to main interface)")
+	runCmd.Flags().BoolVar(&natEIM, "nat-eim", true,
+		"Enable Endpoint-Independent Mapping per RFC 4787")
+	runCmd.Flags().BoolVar(&natEIF, "nat-eif", true,
+		"Enable Endpoint-Independent Filtering per RFC 4787")
+	runCmd.Flags().BoolVar(&natHairpin, "nat-hairpin", true,
+		"Enable hairpinning for internal-to-internal NAT traffic")
+	runCmd.Flags().BoolVar(&natALGFTP, "nat-alg-ftp", true,
+		"Enable FTP Application Layer Gateway")
+	runCmd.Flags().BoolVar(&natALGSIP, "nat-alg-sip", false,
+		"Enable SIP Application Layer Gateway")
+	runCmd.Flags().BoolVar(&natBulkLogging, "nat-bulk-logging", false,
+		"Enable RFC 6908 bulk port allocation logging format")
 
 	// Device authentication flags
 	runCmd.Flags().StringVar(&authMode, "auth-mode", "none",
@@ -271,6 +321,44 @@ func init() {
 		"HA role: active or standby (empty = no HA)")
 	runCmd.Flags().StringVar(&haListenAddr, "ha-listen", ":9000",
 		"HA sync listen address (active node only)")
+
+	// Resilience flags (Issue #65)
+	runCmd.Flags().DurationVar(&healthCheckInterval, "health-check-interval", 5*time.Second,
+		"Interval for checking Nexus/peer health")
+	runCmd.Flags().IntVar(&healthCheckRetries, "health-check-retries", 3,
+		"Number of failed health checks before declaring partition")
+	runCmd.Flags().StringVar(&radiusPartitionMode, "radius-partition-mode", "cached",
+		"Behavior during RADIUS unavailability: reject, cached, allow")
+	runCmd.Flags().BoolVar(&shortLeaseEnabled, "short-lease-enabled", false,
+		"Enable short leases when pool utilization is high")
+	runCmd.Flags().Float64Var(&shortLeaseThreshold, "short-lease-threshold", 0.90,
+		"Pool utilization threshold to trigger short leases (0.0-1.0)")
+	runCmd.Flags().DurationVar(&shortLeaseDuration, "short-lease-duration", 5*time.Minute,
+		"Duration of short leases when threshold is exceeded")
+
+	// TTL/Epoch lease mode flags (Issue #66)
+	runCmd.Flags().StringVar(&poolMode, "pool-mode", "static",
+		"Allocation mode: static or lease")
+	runCmd.Flags().DurationVar(&epochPeriod, "epoch-period", 5*time.Minute,
+		"Duration of each epoch for lease mode")
+	runCmd.Flags().IntVar(&epochGrace, "epoch-grace", 1,
+		"Number of grace epochs before reclaiming IPs")
+
+	// PPPoE flags
+	runCmd.Flags().BoolVar(&pppoeEnabled, "pppoe-enabled", false,
+		"Enable PPPoE server")
+	runCmd.Flags().StringVar(&pppoeInterface, "pppoe-interface", "",
+		"Interface for PPPoE (defaults to main interface)")
+	runCmd.Flags().StringVar(&pppoeACName, "pppoe-ac-name", "BNG-AC",
+		"Access Concentrator name")
+	runCmd.Flags().StringVar(&pppoeServiceName, "pppoe-service-name", "internet",
+		"Service name to advertise")
+	runCmd.Flags().StringVar(&pppoeAuthType, "pppoe-auth-type", "pap",
+		"Authentication type: pap, chap, or both")
+	runCmd.Flags().DurationVar(&pppoeSessionTimeout, "pppoe-session-timeout", 30*time.Minute,
+		"Session idle timeout")
+	runCmd.Flags().Uint16Var(&pppoeMRU, "pppoe-mru", 1492,
+		"Maximum Receive Unit")
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)

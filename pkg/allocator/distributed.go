@@ -15,8 +15,11 @@ type DistributedAllocator struct {
 	mu sync.RWMutex
 
 	// Pool configuration
-	poolID    string
-	allocator *IPAllocator
+	poolID string
+
+	// Allocators - only one is used based on mode
+	allocator      *IPAllocator          // Used for session mode (no expiry)
+	epochAllocator *EpochBitmapAllocator // Used for lease mode (epoch-based expiry)
 
 	// Distributed state
 	store Store
@@ -24,9 +27,8 @@ type DistributedAllocator struct {
 	// Pool mode determines allocation behavior
 	mode PoolMode
 
-	// Epoch tracking (for lease mode)
-	currentEpoch uint64
-	epochMu      sync.RWMutex
+	// Epoch period for lease mode
+	epochPeriod time.Duration
 }
 
 // DistributedStats holds statistics for the distributed allocator.
@@ -111,16 +113,40 @@ type DistributedConfig struct {
 
 // NewDistributedAllocator creates a new distributed allocator.
 func NewDistributedAllocator(cfg DistributedConfig, store Store) (*DistributedAllocator, error) {
-	allocator, err := NewIPAllocator(cfg.BaseNetwork, cfg.PrefixLen)
-	if err != nil {
-		return nil, fmt.Errorf("create IP allocator: %w", err)
+	da := &DistributedAllocator{
+		poolID:      cfg.PoolID,
+		store:       store,
+		mode:        cfg.Mode,
+		epochPeriod: cfg.EpochPeriod,
 	}
 
-	da := &DistributedAllocator{
-		poolID:    cfg.PoolID,
-		allocator: allocator,
-		store:     store,
-		mode:      cfg.Mode,
+	// Set default epoch period
+	if da.epochPeriod == 0 {
+		da.epochPeriod = 1 * time.Hour
+	}
+
+	// Create appropriate allocator based on mode
+	switch cfg.Mode {
+	case PoolModeLease:
+		// Use epoch bitmap allocator for lease mode (O(1) epoch advancement)
+		epochCfg := EpochBitmapConfig{
+			BaseNetwork:  cfg.BaseNetwork,
+			PrefixLength: cfg.PrefixLen,
+			GracePeriod:  1, // Default: 1 epoch grace period
+		}
+		epochAlloc, err := NewEpochBitmapAllocator(epochCfg)
+		if err != nil {
+			return nil, fmt.Errorf("create epoch allocator: %w", err)
+		}
+		da.epochAllocator = epochAlloc
+
+	default:
+		// Use standard IP allocator for session mode (no expiry)
+		allocator, err := NewIPAllocator(cfg.BaseNetwork, cfg.PrefixLen)
+		if err != nil {
+			return nil, fmt.Errorf("create IP allocator: %w", err)
+		}
+		da.allocator = allocator
 	}
 
 	return da, nil
@@ -149,10 +175,27 @@ func (da *DistributedAllocator) Allocate(ctx context.Context, subscriberID strin
 	da.mu.Lock()
 	defer da.mu.Unlock()
 
-	// Try local allocation first
-	prefix, err := da.allocator.Allocate(subscriberID)
-	if err != nil {
-		return nil, err
+	var prefix *net.IPNet
+	var epoch uint64
+
+	// Use appropriate allocator based on mode
+	if da.mode == PoolModeLease {
+		// Lease mode: use epoch bitmap allocator
+		ip, err := da.epochAllocator.Allocate(ctx, subscriberID)
+		if err != nil {
+			return nil, err
+		}
+		// Convert IP to /32 prefix
+		prefix = &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
+		epoch = da.epochAllocator.GetCurrentEpoch()
+	} else {
+		// Session mode: use standard IP allocator
+		var err error
+		prefix, err = da.allocator.Allocate(subscriberID)
+		if err != nil {
+			return nil, err
+		}
+		epoch = 0 // No epoch for session mode
 	}
 
 	// Persist to distributed store
@@ -160,13 +203,17 @@ func (da *DistributedAllocator) Allocate(ctx context.Context, subscriberID strin
 		PoolID:       da.poolID,
 		SubscriberID: subscriberID,
 		Prefix:       prefix.String(),
-		Epoch:        da.getCurrentEpoch(),
+		Epoch:        epoch,
 		AllocatedAt:  time.Now().UTC(),
 	}
 
 	if err := da.saveAllocation(ctx, alloc); err != nil {
 		// Rollback local allocation
-		da.allocator.Release(subscriberID)
+		if da.mode == PoolModeLease {
+			da.epochAllocator.Release(ctx, subscriberID)
+		} else {
+			da.allocator.Release(subscriberID)
+		}
 		return nil, fmt.Errorf("save allocation: %w", err)
 	}
 
@@ -178,22 +225,41 @@ func (da *DistributedAllocator) AllocateWithMAC(ctx context.Context, subscriberI
 	da.mu.Lock()
 	defer da.mu.Unlock()
 
-	prefix, err := da.allocator.Allocate(subscriberID)
-	if err != nil {
-		return nil, err
+	var prefix *net.IPNet
+	var epoch uint64
+
+	// Use appropriate allocator based on mode
+	if da.mode == PoolModeLease {
+		ip, err := da.epochAllocator.Allocate(ctx, subscriberID)
+		if err != nil {
+			return nil, err
+		}
+		prefix = &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
+		epoch = da.epochAllocator.GetCurrentEpoch()
+	} else {
+		var err error
+		prefix, err = da.allocator.Allocate(subscriberID)
+		if err != nil {
+			return nil, err
+		}
+		epoch = 0
 	}
 
 	alloc := &DistributedAllocation{
 		PoolID:       da.poolID,
 		SubscriberID: subscriberID,
 		Prefix:       prefix.String(),
-		Epoch:        da.getCurrentEpoch(),
+		Epoch:        epoch,
 		AllocatedAt:  time.Now().UTC(),
 		MAC:          mac.String(),
 	}
 
 	if err := da.saveAllocation(ctx, alloc); err != nil {
-		da.allocator.Release(subscriberID)
+		if da.mode == PoolModeLease {
+			da.epochAllocator.Release(ctx, subscriberID)
+		} else {
+			da.allocator.Release(subscriberID)
+		}
 		return nil, fmt.Errorf("save allocation: %w", err)
 	}
 
@@ -209,15 +275,18 @@ func (da *DistributedAllocator) Renew(ctx context.Context, subscriberID string) 
 	da.mu.Lock()
 	defer da.mu.Unlock()
 
-	// Get existing allocation
+	// Renew in epoch allocator (updates generation to current epoch)
+	if err := da.epochAllocator.Renew(ctx, subscriberID); err != nil {
+		return err
+	}
+
+	// Update distributed store
 	alloc, err := da.getAllocation(ctx, subscriberID)
 	if err != nil {
 		return err
 	}
 
-	// Update epoch
-	alloc.Epoch = da.getCurrentEpoch()
-
+	alloc.Epoch = da.epochAllocator.GetCurrentEpoch()
 	return da.saveAllocation(ctx, alloc)
 }
 
@@ -226,8 +295,15 @@ func (da *DistributedAllocator) Release(ctx context.Context, subscriberID string
 	da.mu.Lock()
 	defer da.mu.Unlock()
 
-	if err := da.allocator.Release(subscriberID); err != nil {
-		return err
+	// Release from appropriate allocator
+	if da.mode == PoolModeLease {
+		if err := da.epochAllocator.Release(ctx, subscriberID); err != nil {
+			return err
+		}
+	} else {
+		if err := da.allocator.Release(subscriberID); err != nil {
+			return err
+		}
 	}
 
 	return da.deleteAllocation(ctx, subscriberID)
@@ -237,6 +313,15 @@ func (da *DistributedAllocator) Release(ctx context.Context, subscriberID string
 func (da *DistributedAllocator) Get(subscriberID string) (*net.IPNet, bool) {
 	da.mu.RLock()
 	defer da.mu.RUnlock()
+
+	if da.mode == PoolModeLease {
+		ip := da.epochAllocator.Lookup(subscriberID)
+		if ip == nil {
+			return nil, false
+		}
+		return &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}, true
+	}
+
 	prefix := da.allocator.Lookup(subscriberID)
 	return prefix, prefix != nil
 }
@@ -245,6 +330,12 @@ func (da *DistributedAllocator) Get(subscriberID string) (*net.IPNet, bool) {
 func (da *DistributedAllocator) GetByPrefix(prefix *net.IPNet) (string, bool) {
 	da.mu.RLock()
 	defer da.mu.RUnlock()
+
+	if da.mode == PoolModeLease {
+		subID := da.epochAllocator.LookupByIP(prefix.IP)
+		return subID, subID != ""
+	}
+
 	subID := da.allocator.LookupByPrefix(prefix)
 	return subID, subID != ""
 }
@@ -253,7 +344,16 @@ func (da *DistributedAllocator) GetByPrefix(prefix *net.IPNet) (string, bool) {
 func (da *DistributedAllocator) Stats() DistributedStats {
 	da.mu.RLock()
 	defer da.mu.RUnlock()
-	allocated, total, utilization := da.allocator.Stats()
+
+	var allocated, total uint64
+	var utilization float64
+
+	if da.mode == PoolModeLease {
+		allocated, total, utilization = da.epochAllocator.Stats()
+	} else {
+		allocated, total, utilization = da.allocator.Stats()
+	}
+
 	return DistributedStats{
 		Allocated:   int(allocated),
 		Total:       int(total),
@@ -263,21 +363,11 @@ func (da *DistributedAllocator) Stats() DistributedStats {
 
 // --- Epoch management (lease mode) ---
 
-func (da *DistributedAllocator) getCurrentEpoch() uint64 {
-	da.epochMu.RLock()
-	defer da.epochMu.RUnlock()
-	return da.currentEpoch
-}
-
-func (da *DistributedAllocator) advanceEpoch() {
-	da.epochMu.Lock()
-	da.currentEpoch++
-	da.epochMu.Unlock()
-}
-
+// epochLoop advances the epoch periodically for lease mode.
+// With EpochBitmapAllocator, this is O(1) - just increment a counter.
+// Expired allocations are cleaned up lazily during allocation/lookup.
 func (da *DistributedAllocator) epochLoop(ctx context.Context) {
-	// TODO: Get epoch period from config
-	ticker := time.NewTicker(1 * time.Hour)
+	ticker := time.NewTicker(da.epochPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -285,22 +375,27 @@ func (da *DistributedAllocator) epochLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			da.advanceEpoch()
-			da.reclaimExpired(ctx)
+			da.mu.Lock()
+			// O(1) epoch advancement - no bitmap scanning!
+			newEpoch := da.epochAllocator.AdvanceEpoch()
+			da.mu.Unlock()
+
+			// Sync expired allocations from distributed store
+			// This is optional but keeps the store clean
+			da.cleanupExpiredFromStore(ctx, newEpoch)
 		}
 	}
 }
 
-// reclaimExpired releases allocations from epoch < current - 1.
-func (da *DistributedAllocator) reclaimExpired(ctx context.Context) {
-	currentEpoch := da.getCurrentEpoch()
+// cleanupExpiredFromStore removes expired allocations from the distributed store.
+// This is a background cleanup task - the epoch allocator handles local expiration lazily.
+func (da *DistributedAllocator) cleanupExpiredFromStore(ctx context.Context, currentEpoch uint64) {
 	if currentEpoch < 2 {
-		return // Need at least 2 epochs for grace period
+		return
 	}
 
-	threshold := currentEpoch - 2 // Two-epoch grace period
+	threshold := currentEpoch - 2 // Match epoch allocator's grace period logic
 
-	// Query all allocations for this pool
 	results, err := da.store.Query(ctx, da.keyPrefix())
 	if err != nil {
 		return
@@ -313,10 +408,33 @@ func (da *DistributedAllocator) reclaimExpired(ctx context.Context) {
 		}
 
 		if alloc.Epoch < threshold {
-			// Expired - reclaim
-			da.Release(ctx, alloc.SubscriberID)
+			// Remove from store (local allocator already handles this lazily)
+			da.store.Delete(ctx, da.allocationKey(alloc.SubscriberID))
 		}
 	}
+}
+
+// GetCurrentEpoch returns the current epoch (for lease mode).
+func (da *DistributedAllocator) GetCurrentEpoch() uint64 {
+	da.mu.RLock()
+	defer da.mu.RUnlock()
+
+	if da.mode == PoolModeLease && da.epochAllocator != nil {
+		return da.epochAllocator.GetCurrentEpoch()
+	}
+	return 0
+}
+
+// AdvanceEpoch manually advances the epoch (useful for testing).
+// Returns the new epoch value.
+func (da *DistributedAllocator) AdvanceEpoch() uint64 {
+	da.mu.Lock()
+	defer da.mu.Unlock()
+
+	if da.mode == PoolModeLease && da.epochAllocator != nil {
+		return da.epochAllocator.AdvanceEpoch()
+	}
+	return 0
 }
 
 // --- Store operations ---
@@ -372,10 +490,23 @@ func (da *DistributedAllocator) loadAllocations(ctx context.Context) error {
 			continue
 		}
 
-		// Set allocation directly from store (store is authoritative)
-		if err := da.allocator.SetAllocation(alloc.SubscriberID, prefix); err != nil {
-			// Log but continue - might be a conflict
-			continue
+		if da.mode == PoolModeLease {
+			// For lease mode, check if allocation is still valid
+			currentEpoch := da.epochAllocator.GetCurrentEpoch()
+			if currentEpoch >= 2 && alloc.Epoch < currentEpoch-2 {
+				// Expired - skip loading and clean up from store
+				da.store.Delete(ctx, da.allocationKey(alloc.SubscriberID))
+				continue
+			}
+
+			// Allocate in epoch allocator (will set correct generation)
+			da.epochAllocator.Allocate(ctx, alloc.SubscriberID)
+		} else {
+			// Session mode: set allocation directly from store
+			if err := da.allocator.SetAllocation(alloc.SubscriberID, prefix); err != nil {
+				// Log but continue - might be a conflict
+				continue
+			}
 		}
 	}
 
@@ -387,11 +518,16 @@ func (da *DistributedAllocator) handleRemoteChange(key string, value []byte, del
 	da.mu.Lock()
 	defer da.mu.Unlock()
 
+	// Extract subscriber ID from key
+	// Key format: /allocation/{poolID}/{subscriberID}
+	subscriberID := key[len(da.keyPrefix()):]
+
 	if deleted {
-		// Extract subscriber ID from key
-		// Key format: /allocation/{poolID}/{subscriberID}
-		subscriberID := key[len(da.keyPrefix()):]
-		da.allocator.Release(subscriberID)
+		if da.mode == PoolModeLease {
+			da.epochAllocator.Release(context.Background(), subscriberID)
+		} else {
+			da.allocator.Release(subscriberID)
+		}
 		return
 	}
 
@@ -400,19 +536,35 @@ func (da *DistributedAllocator) handleRemoteChange(key string, value []byte, del
 		return
 	}
 
-	// Parse prefix and mark as allocated
+	// Parse prefix
 	_, prefix, err := net.ParseCIDR(alloc.Prefix)
 	if err != nil {
 		return
 	}
 
-	// Check if we already have this allocation
-	if existing := da.allocator.Lookup(alloc.SubscriberID); existing != nil {
-		if existing.String() == prefix.String() {
+	if da.mode == PoolModeLease {
+		// For lease mode, check if allocation is expired
+		currentEpoch := da.epochAllocator.GetCurrentEpoch()
+		if currentEpoch >= 2 && alloc.Epoch < currentEpoch-2 {
+			return // Expired, ignore
+		}
+
+		// Check if we already have this allocation
+		if existing := da.epochAllocator.Lookup(alloc.SubscriberID); existing != nil {
 			return // Already in sync
 		}
-	}
 
-	// Apply remote allocation (SetAllocation handles conflicts)
-	da.allocator.SetAllocation(alloc.SubscriberID, prefix)
+		// Allocate in epoch allocator
+		da.epochAllocator.Allocate(context.Background(), alloc.SubscriberID)
+	} else {
+		// Session mode: check if we already have this allocation
+		if existing := da.allocator.Lookup(alloc.SubscriberID); existing != nil {
+			if existing.String() == prefix.String() {
+				return // Already in sync
+			}
+		}
+
+		// Apply remote allocation
+		da.allocator.SetAllocation(alloc.SubscriberID, prefix)
+	}
 }

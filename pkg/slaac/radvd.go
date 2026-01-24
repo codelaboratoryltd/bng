@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv6"
 )
 
@@ -167,8 +166,10 @@ func NewServer(cfg Config, logger *zap.Logger) (*Server, error) {
 
 // Start starts the Router Advertisement daemon
 func (s *Server) Start(ctx context.Context) error {
-	// Listen for ICMPv6
-	conn, err := icmp.ListenPacket("ip6:ipv6-icmp", "::")
+	// Listen for ICMPv6 using net.ListenPacket which returns net.PacketConn
+	// Note: icmp.ListenPacket returns *icmp.PacketConn which doesn't implement
+	// net.PacketConn (missing Read method), causing a panic in ipv6.NewPacketConn
+	conn, err := net.ListenPacket("ip6:ipv6-icmp", "::")
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
 	}

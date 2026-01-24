@@ -39,6 +39,7 @@ type AllocationResponse struct {
 	PoolID       string    `json:"pool_id"`
 	SubscriberID string    `json:"subscriber_id"`
 	IP           string    `json:"ip"`
+	Prefix       int       `json:"prefix,omitempty"` // Prefix length for IPv6 (e.g., 64 for /64)
 	Timestamp    time.Time `json:"timestamp"`
 }
 
@@ -200,10 +201,116 @@ func (h *HTTPAllocator) LookupIPv4(ctx context.Context, subscriberID, poolID str
 // ErrNoAllocation is returned when a subscriber has no allocation in Nexus.
 var ErrNoAllocation = fmt.Errorf("no allocation found")
 
-// AllocateIPv6 allocates an IPv6 address (stub - returns nil for now).
+// AllocateIPv6 allocates an IPv6 address/prefix from the specified pool via Nexus API.
+// Returns the allocated IP, the prefix (as IPNet), and any error.
 func (h *HTTPAllocator) AllocateIPv6(ctx context.Context, subscriberID, poolID string) (net.IP, *net.IPNet, error) {
-	// IPv6 allocation not implemented yet
-	return nil, nil, nil
+	// Ensure we have pool info cached
+	poolInfo, err := h.getPoolInfo(ctx, poolID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("get pool info: %w", err)
+	}
+
+	// Create allocation request
+	req := AllocationRequest{
+		PoolID:       poolID,
+		SubscriberID: subscriberID,
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	// Call Nexus API
+	url := h.baseURL + "/api/v1/allocations"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := h.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		// Subscriber already has an allocation, fetch it
+		return h.getExistingIPv6Allocation(ctx, subscriberID, poolInfo)
+	}
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("allocation failed with status %d", resp.StatusCode)
+	}
+
+	var allocResp AllocationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&allocResp); err != nil {
+		return nil, nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	ip := net.ParseIP(allocResp.IP)
+	if ip == nil {
+		return nil, nil, fmt.Errorf("invalid IP in response: %s", allocResp.IP)
+	}
+
+	// Build the prefix - use response prefix if available, otherwise use pool mask
+	prefixLen := allocResp.Prefix
+	if prefixLen == 0 {
+		// Fall back to pool mask size
+		ones, _ := poolInfo.Mask.Size()
+		prefixLen = ones
+	}
+
+	prefix := &net.IPNet{
+		IP:   ip,
+		Mask: net.CIDRMask(prefixLen, 128),
+	}
+
+	return ip, prefix, nil
+}
+
+// getExistingIPv6Allocation fetches an existing IPv6 allocation for a subscriber.
+func (h *HTTPAllocator) getExistingIPv6Allocation(ctx context.Context, subscriberID string, poolInfo *PoolInfo) (net.IP, *net.IPNet, error) {
+	url := h.baseURL + "/api/v1/allocations/" + subscriberID
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := h.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("get allocation failed with status %d", resp.StatusCode)
+	}
+
+	var allocResp AllocationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&allocResp); err != nil {
+		return nil, nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	ip := net.ParseIP(allocResp.IP)
+	if ip == nil {
+		return nil, nil, fmt.Errorf("invalid IP in response: %s", allocResp.IP)
+	}
+
+	// Build the prefix
+	prefixLen := allocResp.Prefix
+	if prefixLen == 0 {
+		ones, _ := poolInfo.Mask.Size()
+		prefixLen = ones
+	}
+
+	prefix := &net.IPNet{
+		IP:   ip,
+		Mask: net.CIDRMask(prefixLen, 128),
+	}
+
+	return ip, prefix, nil
 }
 
 // ReleaseIPv4 releases an IPv4 address allocation.
@@ -227,8 +334,24 @@ func (h *HTTPAllocator) ReleaseIPv4(ctx context.Context, subscriberID string) er
 	return nil
 }
 
-// ReleaseIPv6 releases an IPv6 address (stub).
-func (h *HTTPAllocator) ReleaseIPv6(ctx context.Context, ip net.IP) error {
+// ReleaseIPv6 releases an IPv6 address allocation by subscriber ID.
+func (h *HTTPAllocator) ReleaseIPv6(ctx context.Context, subscriberID string) error {
+	url := h.baseURL + "/api/v1/allocations/" + subscriberID
+	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := h.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("release failed with status %d", resp.StatusCode)
+	}
+
 	return nil
 }
 
