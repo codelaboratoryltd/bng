@@ -13,6 +13,7 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
 	"github.com/codelaboratoryltd/bng/pkg/nat"
 	"github.com/codelaboratoryltd/bng/pkg/nexus"
+	"github.com/codelaboratoryltd/bng/pkg/pool"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
 	"github.com/insomniacslk/dhcp/dhcpv4"
@@ -44,6 +45,13 @@ type Server struct {
 
 	// Nexus integration (optional) - for centralized IP allocation
 	nexusClient *nexus.Client
+
+	// HTTPAllocator for direct Nexus API allocation (Demo E - RADIUS-less mode)
+	httpAllocator     *nexus.HTTPAllocator
+	httpAllocatorPool string // Pool ID to use with HTTPAllocator
+
+	// PeerPool for distributed allocation (Demo G - peer pool mode)
+	peerPool *pool.PeerPool
 
 	// Enable RADIUS auth (if false, all MACs are accepted)
 	radiusAuthEnabled bool
@@ -138,6 +146,21 @@ func (s *Server) SetNATManager(nm *nat.Manager) {
 // When set, IP allocation happens via Nexus (hashring-based) instead of local pools.
 func (s *Server) SetNexusClient(nc *nexus.Client) {
 	s.nexusClient = nc
+}
+
+// SetHTTPAllocator sets the HTTP-based allocator for direct Nexus API calls.
+// This is used in RADIUS-less mode (Demo E) where the BNG allocates IPs
+// directly from Nexus without requiring a local store or full Nexus client.
+func (s *Server) SetHTTPAllocator(allocator *nexus.HTTPAllocator, poolID string) {
+	s.httpAllocator = allocator
+	s.httpAllocatorPool = poolID
+}
+
+// SetPeerPool sets the peer pool for distributed allocation.
+// This is used in peer pool mode (Demo G) where BNGs coordinate
+// allocation via hashring-based peer-to-peer communication.
+func (s *Server) SetPeerPool(pp *pool.PeerPool) {
+	s.peerPool = pp
 }
 
 // generateSessionID generates a unique RADIUS session ID
@@ -339,8 +362,28 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		poolID = existingLease.PoolID
 		pool = s.poolMgr.GetPool(poolID)
 	} else {
-		// Try Nexus first for centralized IP allocation
-		if s.nexusClient != nil {
+		// Try HTTP allocator first (Demo E - RADIUS-less mode)
+		if s.httpAllocator != nil && s.httpAllocatorPool != "" {
+			// Use MAC address as subscriber ID for allocation
+			allocatedIP, _, _, err := s.httpAllocator.AllocateIPv4(context.Background(), macStr, s.httpAllocatorPool)
+			if err != nil {
+				s.logger.Warn("HTTPAllocator IP allocation failed, falling back to local pool",
+					zap.String("mac", macStr),
+					zap.String("pool", s.httpAllocatorPool),
+					zap.Error(err),
+				)
+			} else {
+				ip = allocatedIP
+				s.logger.Info("Allocated IP via HTTPAllocator (Nexus)",
+					zap.String("mac", macStr),
+					zap.String("ip", ip.String()),
+					zap.String("pool", s.httpAllocatorPool),
+				)
+			}
+		}
+
+		// Try Nexus client next for centralized IP allocation
+		if ip == nil && s.nexusClient != nil {
 			if sub, ok := s.nexusClient.GetSubscriberByMAC(macStr); ok {
 				// Subscriber found in Nexus
 				if sub.IPv4Addr != "" {

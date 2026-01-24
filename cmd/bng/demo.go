@@ -25,6 +25,7 @@ var (
 	demoActivateRatio float64
 	demoDuration      time.Duration
 	demoAPIPort       int
+	demoNexusURL      string
 )
 
 func init() {
@@ -36,6 +37,8 @@ func init() {
 		"Demo duration before showing final stats")
 	demoCmd.Flags().IntVar(&demoAPIPort, "api-port", 8080,
 		"HTTP API port for activation")
+	demoCmd.Flags().StringVar(&demoNexusURL, "nexus-url", "",
+		"External Nexus URL for IP allocation (empty = in-memory)")
 
 	rootCmd.AddCommand(demoCmd)
 }
@@ -56,6 +59,14 @@ No eBPF required - runs on any platform including macOS.`,
 	RunE: runDemo,
 }
 
+// DemoAllocator is the interface for IP allocation in demo mode.
+type DemoAllocator interface {
+	AllocateIPv4(ctx context.Context, session *subscriber.Session, poolID string) (net.IP, net.IPMask, net.IP, error)
+	AllocateIPv6(ctx context.Context, session *subscriber.Session, poolID string) (net.IP, *net.IPNet, error)
+	ReleaseIPv4(ctx context.Context, ip net.IP) error
+	ReleaseIPv6(ctx context.Context, ip net.IP) error
+}
+
 // DemoRunner orchestrates the demo scenario
 type DemoRunner struct {
 	logger  *zap.Logger
@@ -71,7 +82,8 @@ type DemoRunner struct {
 	ponMgr        *pon.Manager
 	sessionMgr    *subscriber.Manager
 	stubAuth      *StubAuthenticator
-	stubAllocator *StubAllocator
+	allocator     DemoAllocator
+	httpAllocator *nexus.HTTPAllocator // Only set when using external Nexus
 
 	// Demo state
 	mu            sync.RWMutex
@@ -242,6 +254,42 @@ func (s *StubAllocator) ReleaseIPv6(ctx context.Context, ip net.IP) error {
 	return nil
 }
 
+// HTTPAllocatorAdapter wraps HTTPAllocator to implement the subscriber.AddressAllocator interface.
+type HTTPAllocatorAdapter struct {
+	allocator *nexus.HTTPAllocator
+}
+
+func NewHTTPAllocatorAdapter(allocator *nexus.HTTPAllocator) *HTTPAllocatorAdapter {
+	return &HTTPAllocatorAdapter{allocator: allocator}
+}
+
+func (h *HTTPAllocatorAdapter) AllocateIPv4(ctx context.Context, session *subscriber.Session, poolID string) (net.IP, net.IPMask, net.IP, error) {
+	// Use session ID as subscriber ID for Nexus
+	subscriberID := session.ID
+	if session.ONUID != "" {
+		subscriberID = session.ONUID
+	}
+	return h.allocator.AllocateIPv4(ctx, subscriberID, poolID)
+}
+
+func (h *HTTPAllocatorAdapter) AllocateIPv6(ctx context.Context, session *subscriber.Session, poolID string) (net.IP, *net.IPNet, error) {
+	subscriberID := session.ID
+	if session.ONUID != "" {
+		subscriberID = session.ONUID
+	}
+	return h.allocator.AllocateIPv6(ctx, subscriberID, poolID)
+}
+
+func (h *HTTPAllocatorAdapter) ReleaseIPv4(ctx context.Context, ip net.IP) error {
+	// For HTTP allocator, we'd need to track which subscriber owns which IP
+	// For now, this is a no-op as Nexus handles cleanup
+	return nil
+}
+
+func (h *HTTPAllocatorAdapter) ReleaseIPv6(ctx context.Context, ip net.IP) error {
+	return nil
+}
+
 func runDemo(cmd *cobra.Command, args []string) error {
 	// Initialize logger
 	logConfig := zap.NewDevelopmentConfig()
@@ -330,6 +378,11 @@ func (d *DemoRunner) printBanner() {
 	fmt.Printf("  Activate ratio: %.0f%%\n", demoActivateRatio*100)
 	fmt.Printf("  Duration:       %s\n", demoDuration)
 	fmt.Printf("  API Port:       %d\n", demoAPIPort)
+	if demoNexusURL != "" {
+		fmt.Printf("  Nexus URL:      %s\n", demoNexusURL)
+	} else {
+		fmt.Printf("  Nexus:          in-memory (standalone)\n")
+	}
 	fmt.Println()
 }
 
@@ -356,9 +409,30 @@ func (d *DemoRunner) initComponents() error {
 		CTagRange: nexus.VLANRange{Start: 1000, End: 2000},
 	})
 
-	// Create stub authenticator and allocator
+	// Create stub authenticator
 	d.stubAuth = NewStubAuthenticator()
-	d.stubAllocator = NewStubAllocator()
+
+	// Create allocator - use HTTP allocator if nexus-url is provided
+	if demoNexusURL != "" {
+		d.log("[INIT] Connecting to external Nexus at %s", demoNexusURL)
+		d.httpAllocator = nexus.NewHTTPAllocator(demoNexusURL)
+
+		// Verify connectivity
+		if err := d.httpAllocator.HealthCheck(d.ctx); err != nil {
+			return fmt.Errorf("cannot connect to Nexus at %s: %w", demoNexusURL, err)
+		}
+		d.log("[INIT] Connected to Nexus successfully")
+
+		// Create default pools in Nexus
+		d.log("[INIT] Creating pools in Nexus...")
+		d.httpAllocator.CreatePool(d.ctx, "wgar", "10.255.0.0/16", 32)
+		d.httpAllocator.CreatePool(d.ctx, "isp-residential", "10.0.0.0/16", 32)
+		d.httpAllocator.CreatePool(d.ctx, "isp-business", "10.16.0.0/16", 32)
+
+		d.allocator = NewHTTPAllocatorAdapter(d.httpAllocator)
+	} else {
+		d.allocator = NewStubAllocator()
+	}
 
 	// Create session manager
 	d.sessionMgr = subscriber.NewManager(
@@ -373,7 +447,7 @@ func (d *DemoRunner) initComponents() error {
 			DefaultUploadRateBps:   50_000_000,
 		},
 		d.stubAuth,
-		d.stubAllocator,
+		d.allocator,
 		d.logger,
 	)
 

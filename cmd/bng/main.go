@@ -14,8 +14,11 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/dhcp"
 	"github.com/codelaboratoryltd/bng/pkg/dhcpv6"
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
+	"github.com/codelaboratoryltd/bng/pkg/ha"
 	"github.com/codelaboratoryltd/bng/pkg/metrics"
 	"github.com/codelaboratoryltd/bng/pkg/nat"
+	"github.com/codelaboratoryltd/bng/pkg/nexus"
+	"github.com/codelaboratoryltd/bng/pkg/pool"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
 	"github.com/codelaboratoryltd/bng/pkg/slaac"
@@ -113,6 +116,22 @@ var (
 	slaacMinInterval time.Duration
 	slaacMaxInterval time.Duration
 	slaacLifetime    uint16
+
+	// Nexus integration (Demo E - RADIUS-less mode)
+	nexusURL    string
+	nexusPoolID string
+
+	// Peer Pool (Demo G - distributed allocation without central Nexus)
+	peerAddrs      []string // Static list of peer addresses
+	peerDiscovery  string   // Discovery method: static, dns
+	peerService    string   // DNS service name for discovery
+	peerNodeID     string   // This node's ID for hashring (defaults to hostname)
+	peerListenAddr string   // Listen address for peer API
+
+	// HA Pair (Demo H - active/standby with P2P sync)
+	haPeerURL    string // HA peer URL for P2P state sync
+	haRole       string // HA role: active or standby
+	haListenAddr string // HA sync listen address
 )
 
 func init() {
@@ -226,6 +245,32 @@ func init() {
 		"Maximum RA interval")
 	runCmd.Flags().Uint16Var(&slaacLifetime, "slaac-lifetime", 1800,
 		"Router lifetime in seconds (0 = not a default router)")
+
+	// Nexus integration flags (Demo E - RADIUS-less mode)
+	runCmd.Flags().StringVar(&nexusURL, "nexus-url", "",
+		"Nexus server URL for distributed IP allocation (e.g., http://nexus:9000)")
+	runCmd.Flags().StringVar(&nexusPoolID, "nexus-pool", "default",
+		"Nexus pool ID to use for IP allocation")
+
+	// Peer Pool flags (Demo G - distributed allocation without central Nexus)
+	runCmd.Flags().StringSliceVar(&peerAddrs, "peers", nil,
+		"Peer BNG addresses for distributed pool (comma-separated, e.g., 'bng-0:8080,bng-1:8080')")
+	runCmd.Flags().StringVar(&peerDiscovery, "peer-discovery", "static",
+		"Peer discovery method: static (use --peers), dns (use --peer-service)")
+	runCmd.Flags().StringVar(&peerService, "peer-service", "",
+		"DNS service name for peer discovery (e.g., 'bng-peers.demo.svc')")
+	runCmd.Flags().StringVar(&peerNodeID, "node-id", "",
+		"This node's ID for hashring (defaults to hostname)")
+	runCmd.Flags().StringVar(&peerListenAddr, "peer-listen", ":8081",
+		"Listen address for peer pool API")
+
+	// HA Pair flags (Demo H - active/standby with P2P sync)
+	runCmd.Flags().StringVar(&haPeerURL, "ha-peer", "",
+		"HA peer URL for P2P state sync (e.g., 'bng-standby:9000' or 'http://bng-active:9000')")
+	runCmd.Flags().StringVar(&haRole, "ha-role", "",
+		"HA role: active or standby (empty = no HA)")
+	runCmd.Flags().StringVar(&haListenAddr, "ha-listen", ":9000",
+		"HA sync listen address (active node only)")
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)
@@ -346,6 +391,146 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	}, loader, poolMgr, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create DHCP server: %w", err)
+	}
+
+	// Initialize Nexus HTTPAllocator if configured (Demo E - RADIUS-less mode)
+	if nexusURL != "" {
+		httpAllocator := nexus.NewHTTPAllocator(nexusURL)
+
+		// Verify connectivity to Nexus
+		if err := httpAllocator.HealthCheck(ctx); err != nil {
+			return fmt.Errorf("cannot connect to Nexus at %s: %w", nexusURL, err)
+		}
+
+		dhcpServer.SetHTTPAllocator(httpAllocator, nexusPoolID)
+		logger.Info("Connected to Nexus for distributed IP allocation",
+			zap.String("url", nexusURL),
+			zap.String("pool_id", nexusPoolID),
+		)
+	}
+
+	// Initialize Peer Pool if peers are configured (Demo G - distributed allocation)
+	var peerPool *pool.PeerPool
+	if len(peerAddrs) > 0 || peerDiscovery == "dns" {
+		// Determine node ID
+		nodeID := peerNodeID
+		if nodeID == "" {
+			hostname, _ := os.Hostname()
+			nodeID = hostname
+		}
+
+		// Resolve peers if using DNS discovery
+		var peers []string
+		if peerDiscovery == "dns" && peerService != "" {
+			// DNS-based discovery - resolve SRV records
+			// For now, use static list - full DNS discovery can be added later
+			logger.Warn("DNS peer discovery not yet implemented, using static peers")
+			peers = peerAddrs
+		} else {
+			peers = peerAddrs
+		}
+
+		// Parse DNS servers
+		var dnsServers []string
+		if poolDNS != "" {
+			for _, dns := range splitAndTrim(poolDNS) {
+				dnsServers = append(dnsServers, dns)
+			}
+		}
+
+		peerPool, err = pool.NewPeerPool(pool.PeerPoolConfig{
+			NodeID:     nodeID,
+			Peers:      peers,
+			Network:    poolNetwork,
+			Gateway:    poolGateway,
+			DNSServers: dnsServers,
+			LeaseTime:  leaseTime,
+			ListenAddr: peerListenAddr,
+			Logger:     logger,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create peer pool: %w", err)
+		}
+
+		dhcpServer.SetPeerPool(peerPool)
+		logger.Info("Peer Pool initialized for distributed allocation",
+			zap.String("node_id", nodeID),
+			zap.Int("peers", len(peers)),
+			zap.String("listen", peerListenAddr),
+		)
+
+		// Start peer pool HTTP API server
+		go func() {
+			mux := http.NewServeMux()
+			peerPool.RegisterHandlers(mux)
+			peerServer := &http.Server{
+				Addr:    peerListenAddr,
+				Handler: mux,
+			}
+			logger.Info("Starting peer pool API server", zap.String("addr", peerListenAddr))
+			if err := peerServer.ListenAndServe(); err != http.ErrServerClosed {
+				logger.Error("Peer pool API server error", zap.Error(err))
+			}
+		}()
+	}
+
+	// Initialize HA Syncer if configured (Demo H - active/standby with P2P sync)
+	var haSyncer *ha.HASyncer
+	if haRole != "" {
+		// Create session store for HA
+		haSessionStore := ha.NewInMemorySessionStore()
+
+		// Configure HA syncer
+		haConfig := ha.DefaultSyncConfig()
+		haConfig.ListenAddr = haListenAddr
+
+		// Determine node ID for HA
+		haNodeID := peerNodeID
+		if haNodeID == "" {
+			hostname, _ := os.Hostname()
+			haNodeID = hostname
+		}
+		haConfig.NodeID = haNodeID
+
+		switch haRole {
+		case "active":
+			haConfig.Role = ha.RoleActive
+			logger.Info("HA mode: active",
+				zap.String("node_id", haNodeID),
+				zap.String("listen", haListenAddr),
+			)
+
+		case "standby":
+			haConfig.Role = ha.RoleStandby
+			if haPeerURL == "" {
+				return fmt.Errorf("--ha-peer is required when --ha-role=standby")
+			}
+			// Parse peer URL - remove http:// prefix if present for endpoint
+			endpoint := haPeerURL
+			if len(endpoint) > 7 && endpoint[:7] == "http://" {
+				endpoint = endpoint[7:]
+			}
+			haConfig.Partner = &ha.PartnerInfo{
+				NodeID:   "active", // Will be updated on first sync
+				Endpoint: endpoint,
+			}
+			logger.Info("HA mode: standby",
+				zap.String("node_id", haNodeID),
+				zap.String("peer", endpoint),
+			)
+
+		default:
+			return fmt.Errorf("invalid --ha-role: %s (must be 'active' or 'standby')", haRole)
+		}
+
+		haSyncer = ha.NewHASyncer(haConfig, haSessionStore, logger)
+		if err := haSyncer.Start(); err != nil {
+			return fmt.Errorf("failed to start HA syncer: %w", err)
+		}
+		logger.Info("HA syncer started",
+			zap.String("role", haRole),
+			zap.String("node_id", haNodeID),
+		)
 	}
 
 	// Initialize RADIUS client if enabled
@@ -619,6 +804,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if raServer != nil {
 		if err := raServer.Stop(); err != nil {
 			logger.Warn("Failed to stop SLAAC/RA daemon", zap.Error(err))
+		}
+	}
+	// Stop HA syncer (Demo H)
+	if haSyncer != nil {
+		if err := haSyncer.Stop(); err != nil {
+			logger.Warn("Failed to stop HA syncer", zap.Error(err))
 		}
 	}
 	logger.Info("BNG stopped")
