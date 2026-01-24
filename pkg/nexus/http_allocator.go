@@ -152,6 +152,54 @@ func (h *HTTPAllocator) getExistingAllocation(ctx context.Context, subscriberID 
 	return ip, poolInfo.Mask, poolInfo.Gateway, nil
 }
 
+// LookupIPv4 checks if a subscriber has an existing allocation without creating one.
+// Returns the IP if found, or ErrNoAllocation if the subscriber has no allocation.
+// This is used for walled garden mode: lookup first, only assign local IP if not found.
+func (h *HTTPAllocator) LookupIPv4(ctx context.Context, subscriberID, poolID string) (net.IP, net.IPMask, net.IP, error) {
+	// Ensure we have pool info cached
+	poolInfo, err := h.getPoolInfo(ctx, poolID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("get pool info: %w", err)
+	}
+
+	// Try to get existing allocation (GET, not POST)
+	url := h.baseURL + "/api/v1/allocations/" + subscriberID
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := h.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// No allocation exists - subscriber is not activated
+		return nil, nil, nil, ErrNoAllocation
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, nil, fmt.Errorf("lookup failed with status %d", resp.StatusCode)
+	}
+
+	var allocResp AllocationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&allocResp); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	ip := net.ParseIP(allocResp.IP)
+	if ip == nil {
+		return nil, nil, nil, fmt.Errorf("invalid IP in response: %s", allocResp.IP)
+	}
+
+	return ip, poolInfo.Mask, poolInfo.Gateway, nil
+}
+
+// ErrNoAllocation is returned when a subscriber has no allocation in Nexus.
+var ErrNoAllocation = fmt.Errorf("no allocation found")
+
 // AllocateIPv6 allocates an IPv6 address (stub - returns nil for now).
 func (h *HTTPAllocator) AllocateIPv6(ctx context.Context, subscriberID, poolID string) (net.IP, *net.IPNet, error) {
 	// IPv6 allocation not implemented yet

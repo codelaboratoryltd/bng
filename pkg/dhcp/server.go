@@ -362,22 +362,33 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		poolID = existingLease.PoolID
 		pool = s.poolMgr.GetPool(poolID)
 	} else {
-		// Try HTTP allocator first (Demo E - RADIUS-less mode)
+		// Walled Garden Mode: Lookup existing allocation first, don't auto-create
+		// If subscriber has a Nexus allocation (activated), use it
+		// If no allocation exists (not activated), fall back to local walled garden pool
 		if s.httpAllocator != nil && s.httpAllocatorPool != "" {
-			// Use MAC address as subscriber ID for allocation
-			allocatedIP, _, _, err := s.httpAllocator.AllocateIPv4(context.Background(), macStr, s.httpAllocatorPool)
-			if err != nil {
-				s.logger.Warn("HTTPAllocator IP allocation failed, falling back to local pool",
-					zap.String("mac", macStr),
-					zap.String("pool", s.httpAllocatorPool),
-					zap.Error(err),
-				)
-			} else {
+			// First, LOOKUP existing allocation (doesn't create one)
+			allocatedIP, _, _, err := s.httpAllocator.LookupIPv4(context.Background(), macStr, s.httpAllocatorPool)
+			if err == nil {
+				// Subscriber has an existing allocation - they are activated
 				ip = allocatedIP
-				s.logger.Info("Allocated IP via HTTPAllocator (Nexus)",
+				s.logger.Info("Found existing Nexus allocation (subscriber activated)",
 					zap.String("mac", macStr),
 					zap.String("ip", ip.String()),
 					zap.String("pool", s.httpAllocatorPool),
+				)
+			} else if err == nexus.ErrNoAllocation {
+				// No allocation exists - subscriber is not activated
+				// Will fall through to local walled garden pool
+				s.logger.Info("No Nexus allocation found, using walled garden pool",
+					zap.String("mac", macStr),
+					zap.String("pool", s.httpAllocatorPool),
+				)
+			} else {
+				// Other error (network issue, etc) - log and fall back to local pool
+				s.logger.Warn("Nexus lookup failed, falling back to local pool",
+					zap.String("mac", macStr),
+					zap.String("pool", s.httpAllocatorPool),
+					zap.Error(err),
 				)
 			}
 		}
