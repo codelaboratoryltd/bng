@@ -537,7 +537,14 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		poolID = pool.ID
 
 		// Allocate or verify the requested IP
-		if !pool.Contains(requestedIP) {
+		// When using Nexus (HTTPAllocator), accept the Nexus-allocated IP
+		// even if it's outside the local pool range
+		if s.httpAllocator != nil && s.httpAllocatorPool != "" {
+			s.logger.Debug("Accepting Nexus-allocated IP in REQUEST",
+				zap.String("mac", mac.String()),
+				zap.String("ip", requestedIP.String()),
+			)
+		} else if !pool.Contains(requestedIP) {
 			atomic.AddUint64(&s.naksTotal, 1)
 			return s.buildNAK(req, "IP not in pool")
 		}
