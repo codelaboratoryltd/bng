@@ -61,6 +61,22 @@ type RegistrationResponse struct {
 	Config     *DeviceConfig `json:"config,omitempty"`
 	CLSetPeers []string      `json:"clset_peers,omitempty"`
 	Message    string        `json:"message,omitempty"`
+
+	// HA (High Availability) configuration
+	// When this device is part of an HA pair, these fields describe the HA setup.
+	HARole    string     `json:"ha_role,omitempty"`    // "active", "standby", or empty if not in HA pair
+	HAPartner *HAPartner `json:"ha_partner,omitempty"` // Partner device info (if in HA pair)
+}
+
+// HAPartner contains information about the HA partner device.
+// This is used for P2P state synchronization between active/standby BNGs.
+type HAPartner struct {
+	// NodeID is the partner's unique device identifier.
+	NodeID string `json:"node_id"`
+
+	// Endpoint is the partner's HA sync endpoint (e.g., "10.0.0.1:9000").
+	// The standby connects to this endpoint to receive state updates.
+	Endpoint string `json:"endpoint"`
 }
 
 // DeviceConfig contains the full configuration for this OLT device.
