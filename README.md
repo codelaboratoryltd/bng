@@ -115,13 +115,36 @@ sudo ./bin/bng run \
   --pool-gateway 10.0.1.1 \
   --log-level info
 
-# With Nexus integration (production mode)
+# With Nexus integration (distributed IP allocation)
 sudo ./bin/bng run \
   --interface eth1 \
   --nexus-url http://nexus.internal:9000 \
+  --nexus-pool main-pool \
+  --pool-network 10.200.0.0/16 \
+  --pool-gateway 10.200.0.1
+
+# With RADIUS and Nexus (production mode)
+sudo ./bin/bng run \
+  --interface eth1 \
+  --nexus-url http://nexus.internal:9000 \
+  --nexus-pool prod-pool \
   --radius-enabled \
   --radius-servers radius.isp.com:1812 \
   --radius-secret secret123
+
+# HA Pair - Active node
+sudo ./bin/bng run \
+  --interface eth1 \
+  --pool-network 10.90.0.0/16 \
+  --ha-role active \
+  --ha-listen :9000
+
+# HA Pair - Standby node
+sudo ./bin/bng run \
+  --interface eth1 \
+  --pool-network 10.90.0.0/16 \
+  --ha-role standby \
+  --ha-peer http://bng-active:9000
 ```
 
 ### CLI Options
@@ -136,6 +159,21 @@ sudo ./bin/bng run \
 | `--radius-enabled` | Enable RADIUS authentication | `false` |
 | `--qos-enabled` | Enable QoS rate limiting | `false` |
 | `--nat-enabled` | Enable NAT44/CGNAT | `false` |
+
+### Nexus Integration Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--nexus-url` | Nexus server URL for distributed IP allocation | (none) |
+| `--nexus-pool` | Pool ID to use from Nexus | (none) |
+
+### HA Pair Flags
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--ha-peer` | HA peer URL for P2P state sync | (none) |
+| `--ha-role` | HA role: `active` or `standby` | `active` |
+| `--ha-listen` | HA sync listen address | `:9000` |
 
 ## Project Structure
 

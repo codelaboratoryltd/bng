@@ -74,19 +74,24 @@ Lookup MAC in subscriber_pools
 
 ## Development Status
 
-**Phase 2 (Current)**: Skeleton implementation
+**Phase 2**: Skeleton implementation ✓
 - [x] Map definitions
 - [x] Packet parsing (bounds checking)
 - [x] Cache lookup logic
 - [x] Statistics counters
-- [ ] DHCP reply generation (Phase 3)
 
-**Phase 3 (Next)**: Full DHCP fast path
-- [ ] DHCP OFFER generation in kernel
-- [ ] DHCP ACK generation in kernel
-- [ ] DHCP options encoding
-- [ ] Checksum recalculation
-- [ ] Packet rewriting (MAC/IP swap)
+**Phase 3**: Full DHCP fast path ✓
+- [x] DHCP OFFER generation in kernel
+- [x] DHCP ACK generation in kernel
+- [x] DHCP options encoding
+- [x] Checksum recalculation
+- [x] Packet rewriting (MAC/IP swap)
+
+**Phase 4**: Advanced Features ✓
+- [x] QinQ VLAN support
+- [x] Circuit-ID (Option 82) parsing
+- [x] DHCPv6 support
+- [x] SLAAC integration
 
 ## Debugging
 
