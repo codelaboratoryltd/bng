@@ -76,6 +76,25 @@ const (
 	EventResourceAllocated   EventType = "RESOURCE_ALLOCATED"
 	EventResourceDeallocated EventType = "RESOURCE_DEALLOCATED"
 	EventResourceExhausted   EventType = "RESOURCE_EXHAUSTED"
+
+	// TLS/Certificate security events
+	EventTLSHandshakeSuccess  EventType = "TLS_HANDSHAKE_SUCCESS"
+	EventTLSHandshakeFailure  EventType = "TLS_HANDSHAKE_FAILURE"
+	EventCertificateExpiring  EventType = "CERTIFICATE_EXPIRING"
+	EventCertificateExpired   EventType = "CERTIFICATE_EXPIRED"
+	EventCertificateInvalid   EventType = "CERTIFICATE_INVALID"
+	EventCertificatePinFailed EventType = "CERTIFICATE_PIN_FAILED"
+	EventCertificateRenewed   EventType = "CERTIFICATE_RENEWED"
+	EventCertificateRevoked   EventType = "CERTIFICATE_REVOKED"
+	EventMTLSAuthSuccess      EventType = "MTLS_AUTH_SUCCESS"
+	EventMTLSAuthFailure      EventType = "MTLS_AUTH_FAILURE"
+
+	// ZTP security events
+	EventZTPBootstrapStart   EventType = "ZTP_BOOTSTRAP_START"
+	EventZTPBootstrapSuccess EventType = "ZTP_BOOTSTRAP_SUCCESS"
+	EventZTPBootstrapFailure EventType = "ZTP_BOOTSTRAP_FAILURE"
+	EventZTPConfigReceived   EventType = "ZTP_CONFIG_RECEIVED"
+	EventZTPConfigRejected   EventType = "ZTP_CONFIG_REJECTED"
 )
 
 // Event represents a single audit event.
@@ -156,6 +175,25 @@ type Event struct {
 	ThreatScore  int       `json:"threat_score,omitempty"`  // Risk score 0-100
 	FailureCount int       `json:"failure_count,omitempty"` // Number of failures for brute force detection
 	BlockedUntil time.Time `json:"blocked_until,omitempty"` // Time until which the actor is blocked
+
+	// TLS/Certificate context
+	CertSubject       string    `json:"cert_subject,omitempty"`        // Certificate subject DN
+	CertIssuer        string    `json:"cert_issuer,omitempty"`         // Certificate issuer DN
+	CertSerial        string    `json:"cert_serial,omitempty"`         // Certificate serial number
+	CertFingerprint   string    `json:"cert_fingerprint,omitempty"`    // SHA256 fingerprint of certificate
+	CertNotBefore     time.Time `json:"cert_not_before,omitempty"`     // Certificate validity start
+	CertNotAfter      time.Time `json:"cert_not_after,omitempty"`      // Certificate validity end
+	CertDaysRemaining int       `json:"cert_days_remaining,omitempty"` // Days until certificate expiry
+	TLSVersion        string    `json:"tls_version,omitempty"`         // TLS protocol version (e.g., "TLS 1.3")
+	TLSCipherSuite    string    `json:"tls_cipher_suite,omitempty"`    // Negotiated cipher suite
+	TLSServerName     string    `json:"tls_server_name,omitempty"`     // SNI server name
+	TLSError          string    `json:"tls_error,omitempty"`           // TLS error description
+	PeerAddress       string    `json:"peer_address,omitempty"`        // Remote peer address for TLS connection
+
+	// ZTP context
+	ZTPNexusURL   string `json:"ztp_nexus_url,omitempty"`   // Nexus URL received via ZTP
+	ZTPInterface  string `json:"ztp_interface,omitempty"`   // Network interface used for ZTP
+	ZTPConfigHash string `json:"ztp_config_hash,omitempty"` // Hash of received configuration
 
 	// Additional metadata
 	Metadata map[string]string `json:"metadata,omitempty"`
@@ -298,6 +336,28 @@ func (e EventType) GetSeverity() Severity {
 		return SeverityInfo
 	case EventResourceExhausted:
 		return SeverityWarning
+	// TLS/Certificate events
+	case EventTLSHandshakeSuccess, EventMTLSAuthSuccess:
+		return SeverityInfo
+	case EventTLSHandshakeFailure, EventMTLSAuthFailure:
+		return SeverityWarning
+	case EventCertificateExpiring:
+		return SeverityWarning
+	case EventCertificateExpired, EventCertificateInvalid:
+		return SeverityError
+	case EventCertificatePinFailed:
+		return SeverityCritical
+	case EventCertificateRenewed:
+		return SeverityInfo
+	case EventCertificateRevoked:
+		return SeverityCritical
+	// ZTP events
+	case EventZTPBootstrapStart, EventZTPConfigReceived:
+		return SeverityInfo
+	case EventZTPBootstrapSuccess:
+		return SeverityInfo
+	case EventZTPBootstrapFailure, EventZTPConfigRejected:
+		return SeverityWarning
 	default:
 		return SeverityInfo
 	}
@@ -330,6 +390,13 @@ func (e EventType) Category() string {
 		return "security"
 	case EventResourceAllocated, EventResourceDeallocated, EventResourceExhausted:
 		return "resource"
+	case EventTLSHandshakeSuccess, EventTLSHandshakeFailure, EventCertificateExpiring, EventCertificateExpired,
+		EventCertificateInvalid, EventCertificatePinFailed, EventCertificateRenewed, EventCertificateRevoked,
+		EventMTLSAuthSuccess, EventMTLSAuthFailure:
+		return "tls"
+	case EventZTPBootstrapStart, EventZTPBootstrapSuccess, EventZTPBootstrapFailure,
+		EventZTPConfigReceived, EventZTPConfigRejected:
+		return "ztp"
 	default:
 		return "other"
 	}
