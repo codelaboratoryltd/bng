@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -539,7 +540,7 @@ func (s *HASyncer) connectToStream() error {
 
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			if err == io.EOF || isConnectionClosed(err) {
+			if errors.Is(err, io.EOF) || isConnectionClosed(err) {
 				return fmt.Errorf("connection closed")
 			}
 			return fmt.Errorf("read error: %w", err)
