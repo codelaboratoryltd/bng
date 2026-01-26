@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -376,7 +377,7 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 					zap.String("ip", ip.String()),
 					zap.String("pool", s.httpAllocatorPool),
 				)
-			} else if err == nexus.ErrNoAllocation {
+			} else if errors.Is(err, nexus.ErrNoAllocation) {
 				// No allocation exists - subscriber is not activated
 				// Will fall through to local walled garden pool
 				s.logger.Info("No Nexus allocation found, using walled garden pool",
