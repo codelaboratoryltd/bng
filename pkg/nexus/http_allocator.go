@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,9 @@ type HTTPAllocator struct {
 
 	// Pool cache for gateway/mask information
 	pools map[string]*PoolInfo
+
+	// Mutex to protect concurrent access to pools map
+	mu sync.RWMutex
 }
 
 // PoolInfo caches pool configuration from Nexus.
@@ -357,7 +361,19 @@ func (h *HTTPAllocator) ReleaseIPv6(ctx context.Context, subscriberID string) er
 
 // getPoolInfo fetches and caches pool information from Nexus.
 func (h *HTTPAllocator) getPoolInfo(ctx context.Context, poolID string) (*PoolInfo, error) {
-	// Check cache first
+	// Check cache first (read lock)
+	h.mu.RLock()
+	if info, ok := h.pools[poolID]; ok {
+		h.mu.RUnlock()
+		return info, nil
+	}
+	h.mu.RUnlock()
+
+	// Acquire write lock for fetching and caching
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Double-check after acquiring write lock
 	if info, ok := h.pools[poolID]; ok {
 		return info, nil
 	}
