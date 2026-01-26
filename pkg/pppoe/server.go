@@ -140,6 +140,22 @@ func NewServer(cfg ServerConfig, logger *zap.Logger) (*Server, error) {
 		return nil, fmt.Errorf("failed to get interface: %w", err)
 	}
 
+	return newServerWithInterface(cfg, logger, iface)
+}
+
+// NewServerWithInterface creates a new PPPoE server with explicit interface (for testing)
+func NewServerWithInterface(cfg ServerConfig, logger *zap.Logger, iface *net.Interface) (*Server, error) {
+	if cfg.Interface == "" {
+		return nil, fmt.Errorf("interface required")
+	}
+	if iface == nil {
+		return nil, fmt.Errorf("interface cannot be nil")
+	}
+	return newServerWithInterface(cfg, logger, iface)
+}
+
+// newServerWithInterface is the internal server creation logic
+func newServerWithInterface(cfg ServerConfig, logger *zap.Logger, iface *net.Interface) (*Server, error) {
 	acName := cfg.ACName
 	if acName == "" {
 		acName = "BNG-AC"
@@ -157,6 +173,7 @@ func NewServer(cfg ServerConfig, logger *zap.Logger) (*Server, error) {
 
 	// Create IP pool
 	var pool *IPPool
+	var err error
 	if cfg.ClientPool != "" {
 		gateway := cfg.PoolGateway
 		if gateway == "" {
