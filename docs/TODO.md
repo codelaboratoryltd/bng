@@ -1,371 +1,179 @@
-# BNG Project TODO
+# BNG Project Roadmap
 
-Development task list for eBPF-accelerated Broadband Network Gateway.
+**Current Version**: v0.2.0 (released 2026-01-22)
 
----
-
-## Phase 0: Project Setup ✅
-
-- [x] Create project structure
-- [x] Write architecture document
-- [x] Initialize git repository
-- [ ] Create GitHub repository
-- [ ] Set up project documentation
+**Status**: ✅ All core BNG functionality implemented. In production hardening phase.
 
 ---
 
-## Phase 1: Local Development Environment (Week 1-2)
+## ✅ Completed Milestones
 
-### k3d Cluster Setup
+### v0.2.0 - Full BNG Feature Set (2026-01-22)
+**What we shipped:**
+- Full PPPoE stack (LCP, PAP/CHAP, IPCP/IPV6CP, keep-alive, teardown)
+- NAT44/CGNAT with port blocks, ALGs, hairpinning
+- IPv6 support (DHCPv6, SLAAC, prefix delegation)
+- BGP/FRR integration with BFD failover
+- Device authentication (mTLS, PSK, TPM attestation)
+- RADIUS hardening (interim updates, CoA, teardown accounting)
+- QinQ support, Option 82 parsing, partition resilience
+- CLSet distributed state management
 
-- [ ] Create k3d config for Cilium CNI
-  - [ ] Disable default Flannel CNI (`--flannel-backend=none`)
-  - [ ] Disable default kube-proxy (`--disable=traefik`)
-  - [ ] Configure port mappings (80, 443, DHCP ports)
-  - [ ] Set up local registry for image builds
-- [ ] Test k3d cluster creation
-- [ ] Verify Cilium installation works with k3d
+**Test Coverage**: 45.9% overall (package-specific coverage varies)
 
-### Helmfile + Hydrate Setup
+### v0.1.0 - Core BNG (2026-01-16)
+**What we shipped:**
+- eBPF/XDP DHCP fast path (~10μs latency, 50k req/sec target)
+- Two-tier DHCP architecture (fast path + slow path)
+- RADIUS integration with hashring IP allocation
+- ZTP client, PON manager, walled garden captive portal
+- CLSet client for CRDT state synchronization
+- Prometheus metrics integration
 
-- [ ] Create `charts/` directory structure
-- [ ] Create `charts/helmfile.yaml` with base charts:
-  - [ ] Cilium (CNI)
-  - [ ] Hubble (observability)
-  - [ ] Prometheus (metrics)
-  - [ ] Grafana (dashboards)
-- [ ] Create `charts/hydrate.sh` script (adapt from predbat-saas-infra)
-- [ ] Test helmfile template generation
-
-### Kustomize Structure
-
-- [ ] Create `clusters/local-tilt/` directory
-- [ ] Create base kustomization.yaml
-- [ ] Create `components/` directory for BNG components
-- [ ] Test kustomize build
-
-### Tiltfile
-
-- [ ] Create Tiltfile with:
-  - [ ] k3d cluster creation (via local_resource)
-  - [ ] Cilium installation trigger
-  - [ ] k8s_yaml for kustomize manifests
-  - [ ] Port forwarding for services
-  - [ ] Live reload for development
-- [ ] Test `tilt up` workflow
-- [ ] Verify Hubble UI accessible
+### v0.0.1 - POC Foundation (2025-12-16)
+**What we shipped:**
+- Project structure and documentation
+- Local dev environment (k3d + Tilt + Cilium)
+- eBPF development toolchain
+- Architecture documentation
 
 ---
 
-## Phase 2: eBPF Development Environment (Week 2-3)
+## 🎯 Current Focus (v0.3.0 Development)
 
-### eBPF Toolchain Setup
+### Production Hardening & Performance
+- [ ] Performance testing and optimization ([#XX to be created](https://github.com/codelaboratoryltd/bng/issues))
+- [ ] eBPF ring buffer optimizations (see TODOs in `pkg/nat/manager.go`)
+- [ ] Integration testing with real OLT hardware
+- [ ] Benchmarking: 50k req/sec validation
+- [ ] Latency measurement: P50/P95/P99 tracking
 
-- [ ] Create Dockerfile for eBPF build environment:
-  - [ ] clang/LLVM for eBPF compilation
-  - [ ] libbpf-dev
-  - [ ] bpftool
-  - [ ] linux-headers
-- [ ] Set up `bpf/` directory for eBPF programs
-- [ ] Create Makefile for eBPF compilation
-- [ ] Test eBPF program compilation
+### Monitoring & Observability
+- [ ] Deploy Prometheus ServiceMonitors for BNG ([#44 docs issue](https://github.com/codelaboratoryltd/bng-edge-infra/issues/44))
+- [ ] Create Grafana dashboards for BNG metrics
+- [ ] Add Prometheus alerting rules
+- [ ] Implement log aggregation with Loki
 
-### Go Development Setup
+### Bug Fixes & Security
+- [ ] Fix HTTPAllocator thread-safety bug ([#71](https://github.com/codelaboratoryltd/bng/issues/71))
+- [ ] Graceful shutdown for peer pool HTTP server ([#77](https://github.com/codelaboratoryltd/bng/issues/77))
+- [ ] Remove secrets from CLI flags ([#72](https://github.com/codelaboratoryltd/bng/issues/72))
+- [ ] Fix URL path injection vulnerability ([#69](https://github.com/codelaboratoryltd/bng/issues/69))
+- [ ] Use `errors.Is()` for error comparisons ([#70](https://github.com/codelaboratoryltd/bng/issues/70))
 
-- [ ] Create `cmd/bng/` for main BNG binary
-- [ ] Create `pkg/` for Go packages:
-  - [ ] `pkg/ebpf/` - eBPF map management
-  - [ ] `pkg/dhcp/` - DHCP protocol handling
-  - [ ] `pkg/subscriber/` - Subscriber management
-- [ ] Set up go.mod with dependencies:
-  - [ ] github.com/cilium/ebpf
-  - [ ] github.com/insomniacslk/dhcp
-  - [ ] github.com/prometheus/client_golang
-- [ ] Create Dockerfile for BNG application
-
-### Docker Build Integration
-
-- [ ] Add docker_build to Tiltfile for BNG image
-- [ ] Set up live_update for Go development
-- [ ] Test hot reload workflow
-
----
-
-## Phase 3: DHCP Fast Path POC (Week 3-5)
-
-### eBPF Program: DHCP Parser
-
-- [ ] Write XDP program skeleton (`bpf/dhcp_fastpath.c`)
-- [ ] Implement packet parsing:
-  - [ ] Ethernet header parsing
-  - [ ] IP header parsing
-  - [ ] UDP header parsing
-  - [ ] DHCP packet validation
-- [ ] Add eBPF verifier-safe bounds checking
-- [ ] Test with bpftool
-
-### eBPF Maps
-
-- [ ] Define subscriber_pools map (MAC → pool assignment)
-- [ ] Define ip_pools map (pool_id → pool metadata)
-- [ ] Define active_leases map (IP → lease info)
-- [ ] Implement map pinning for persistence
-- [ ] Test map operations from userspace
-
-### DHCP Reply Generation (eBPF)
-
-- [ ] Implement DHCP OFFER generation in kernel
-- [ ] Implement DHCP ACK generation in kernel
-- [ ] Add DHCP options encoding:
-  - [ ] Subnet mask
-  - [ ] Router (gateway)
-  - [ ] DNS servers
-  - [ ] Lease time
-- [ ] Packet checksum calculation
-- [ ] MAC/IP address swapping for reply
-- [ ] Test with real DHCP client
-
-### Go Userspace Integration
-
-- [ ] Load eBPF program from Go (cilium/ebpf)
-- [ ] Attach XDP program to network interface
-- [ ] Implement eBPF map CRUD operations
-- [ ] Create DHCP slow path handler
-- [ ] Implement IP pool management
-- [ ] Add metrics collection (Prometheus)
-
-### Testing
-
-- [ ] Unit tests for Go code
-- [ ] Integration test with real DHCP client
-- [ ] Load testing (target: 10k+ req/sec)
-- [ ] Verify fast path vs slow path behavior
-
----
-
-## Phase 4: Stub State Management (Week 5-6)
-
-**Note:** External state sync deferred - use simple in-memory store for POC
-
-### In-Memory State Store
-
-- [ ] Create `pkg/state/` package
-- [ ] Implement simple in-memory subscriber database
-- [ ] Add lease expiry tracking
-- [ ] Implement pool allocation logic
-- [ ] Add state persistence (optional: BoltDB/SQLite)
-
-### Pool Management
-
-- [ ] Define IP pool configuration (YAML)
-- [ ] Implement pool CRUD operations
-- [ ] Add client classification logic (residential/business)
-- [ ] Implement IP allocation/deallocation
-
-### Integration with eBPF Cache
-
-- [ ] Sync state store → eBPF maps on allocation
-- [ ] Implement cache invalidation on lease expiry
-- [ ] Add cache warming on startup
-- [ ] Test state consistency
-
----
-
-## Phase 5: Observability & Metrics (Week 6-7)
-
-### Prometheus Metrics
-
-- [ ] DHCP request counters (fast path, slow path)
-- [ ] Latency histograms (P50, P95, P99)
-- [ ] Cache hit rate
-- [ ] Active leases count
-- [ ] Pool utilization
-- [ ] Error counters
-
-### Grafana Dashboard
-
-- [ ] Create BNG overview dashboard
-- [ ] DHCP performance metrics
-- [ ] Pool utilization graphs
-- [ ] Cache performance
-- [ ] Error rate tracking
-
-### Hubble Integration
-
-- [ ] Test Hubble observability for DHCP traffic
-- [ ] Create Hubble CLI examples
-- [ ] Document XDP verdict tracking (XDP_TX vs XDP_PASS)
-
-### Logging
-
-- [ ] Structured logging (JSON)
-- [ ] Log levels (debug, info, warn, error)
-- [ ] Request tracing
-- [ ] Audit log for allocations
-
----
-
-## Phase 6: BNG Core Features (Week 7-10)
-
-**Note:** Beyond DHCP - basic BNG functionality
-
-### Session Management
-
-- [ ] Implement subscriber session tracking
-- [ ] Add session state machine
-- [ ] Session timeout handling
-- [ ] Graceful session termination
-
-### Basic QoS (Rate Limiting)
-
-- [ ] Implement per-subscriber rate limiting (eBPF)
-- [ ] Token bucket algorithm
-- [ ] Upload/download limits
-- [ ] QoS policy configuration
-
-### RADIUS Integration (Stub)
-
-- [ ] Create RADIUS client stub
-- [ ] Authentication request/response
-- [ ] Accounting start/interim/stop
-- [ ] Integration with DHCP flow
-
-### NAT44 (Basic CGNAT)
-
-- [ ] Implement port allocation
-- [ ] NAT session tracking
-- [ ] Port exhaustion handling
-- [ ] NAT pool management
-
----
-
-## Phase 7: Production Readiness (Week 10-12)
-
-### Configuration Management
-
-- [ ] YAML configuration file
-- [ ] Environment variable overrides
-- [ ] Configuration validation
-- [ ] Hot reload support
-
-### Health Checks
-
-- [ ] Liveness probe endpoint
-- [ ] Readiness probe endpoint
-- [ ] eBPF program health check
-- [ ] Interface status monitoring
-
-### Security
-
-- [ ] Drop capabilities (if not needed)
-- [ ] Read-only root filesystem
-- [ ] Resource limits (CPU, memory)
-- [ ] Network policy enforcement
+### Testing Infrastructure
+- [ ] Add unit tests for HTTPAllocator ([#75](https://github.com/codelaboratoryltd/bng/issues/75))
+- [ ] Improve edge cases for pkg/ebpf/loader.go ([#80](https://github.com/codelaboratoryltd/bng/issues/80))
+- [ ] Add tests for pkg/subscriber/manager.go ([#78](https://github.com/codelaboratoryltd/bng/issues/78))
+- [ ] Add HA failover verification tests ([#39](https://github.com/codelaboratoryltd/bng-edge-infra/issues/39))
+- [ ] Add BNG ↔ Nexus API integration tests ([#38](https://github.com/codelaboratoryltd/bng-edge-infra/issues/38))
 
 ### Documentation
-
-- [ ] Deployment guide
-- [ ] Operations runbook
-- [ ] Troubleshooting guide
-- [ ] API documentation
-
-### Performance Tuning
-
-- [ ] CPU affinity optimization
-- [ ] Memory allocation tuning
-- [ ] eBPF map size optimization
-- [ ] XDP performance profiling
+- [ ] Create Prometheus metrics reference ([#44](https://github.com/codelaboratoryltd/bng-edge-infra/issues/44))
+- [ ] Create configuration schema reference ([#43](https://github.com/codelaboratoryltd/bng-edge-infra/issues/43))
+- [ ] Create troubleshooting guide ([#45](https://github.com/codelaboratoryltd/bng-edge-infra/issues/45))
+- [ ] Update README demo status section ([#46](https://github.com/codelaboratoryltd/bng-edge-infra/issues/46))
 
 ---
 
-## Phase 8: Future Enhancements (Post-POC)
+## 📋 Next Milestones (v0.3.x → v1.0.0)
 
-### PPPoE Support
+### v0.3.0 - Production Readiness
+**Goal**: Stable, observable, performant BNG ready for pilot deployments
 
-- [ ] Research PPPoE protocol requirements
-- [ ] Evaluate VPP vs eBPF for PPPoE
-- [ ] Design PPPoE session management
-- [ ] Implement PPPoE in XDP
+**Deliverables:**
+- Performance validation at 50k req/sec
+- Complete monitoring stack (Prometheus + Grafana + Alerts)
+- All critical bugs fixed
+- Security vulnerabilities addressed
+- Integration tests automated in CI/CD
 
-### IPoE Support
+**Issues to complete:**
+- All items under "Current Focus" above
 
-- [ ] DHCP-based subscriber authentication
-- [ ] Integration with RADIUS
-- [ ] MAC-based session tracking
+### v0.4.0 - Scale & Reliability
+**Goal**: Handle 100k+ subscribers, improved HA, operational tooling
 
-### Nexus Integration (CRDT)
+**Potential features:**
+- Horizontal scaling support
+- Active-active HA with session sync
+- Advanced QoS policies
+- Enhanced DDoS protection
+- Operational tooling and debug utilities
 
-- [ ] Replace stub state store with full CLSet client
-- [ ] Hashring-based IP allocation (at RADIUS time)
-- [ ] Multi-region state sync
-- [ ] Handle network partitions (offline-first operation)
+**Needs GitHub issues to be created**
+
+### v1.0.0 - Production General Availability
+**Goal**: Battle-tested BNG ready for wide production use
+
+**Criteria:**
+- 3+ months in production pilot
+- 99.9% uptime demonstrated
+- Complete operational runbooks
+- Certified on major OLT hardware
+- Performance validated at scale
+
+---
+
+## 🚀 Future Roadmap (Post v1.0)
+
+These are high-level future directions, not committed features:
 
 ### Advanced Features
+- **Machine Learning**: Intelligent pool allocation, anomaly detection
+- **Advanced QoS**: Hierarchical QoS, application-aware shaping
+- **5G Integration**: 5G core network integration (5GC BNG)
+- **Segment Routing**: SRv6 support for traffic engineering
+- **Analytics**: Subscriber behavior analytics and insights
 
-- [ ] DHCPv6 support
-- [ ] IPv6 routing
-- [ ] DDoS protection (XDP rate limiting)
-- [ ] Machine learning-based pool selection
+### Multi-Tenancy & Cloud
+- **Multi-tenancy**: Support for virtual BNG instances
+- **Cloud Native**: Full Kubernetes operator with CRDs
+- **Service Mesh**: Integration with Istio/Linkerd for advanced services
+- **Edge Computing**: BNG as edge compute platform
 
----
-
-## Infrastructure Tasks
-
-### CI/CD
-
-- [ ] GitHub Actions workflow for:
-  - [ ] Go tests
-  - [ ] eBPF compilation
-  - [ ] Docker image build
-  - [ ] Push to GHCR
-- [ ] Automated testing on PR
-- [ ] Release automation
-
-### Container Registry
-
-- [ ] Push images to GHCR:
-  - [ ] ghcr.io/codelaboratoryltd/bng
-  - [ ] ghcr.io/codelaboratoryltd/bng-ebpf-builder
+### Ecosystem
+- **Hardware Offload**: SmartNIC integration (Intel, Mellanox)
+- **OSS Integration**: Integration with OpenStack, OpenDaylight
+- **Standards**: Full compliance with MEF, BBF standards
 
 ---
 
-## Documentation Tasks
+## 📊 Development Metrics
 
-- [ ] Write CONTRIBUTING.md
-- [ ] Write DEVELOPMENT.md
-- [ ] Create architecture diagrams (draw.io)
-- [ ] Write blog post series:
-  - [ ] Part 1: eBPF for DHCP acceleration
-  - [ ] Part 2: VPP vs eBPF decision
-  - [ ] Part 3: Building cloud-native BNG
-- [ ] Create demo video
-- [ ] Update README with getting started guide
+**Current Test Coverage**: 45.9% (target: >60% for v1.0)
+**Open Issues**: 13 bugs, 4 test coverage, 2 security
+**Release Cadence**: ~1 week per minor version
+**Contributors**: Core team + community
 
 ---
 
-## Current Focus
+## 🏃‍♂️ How to Contribute
 
-**Version 0.2.0 Released** - All core BNG functionality implemented.
+1. **Pick an open issue** from the lists above
+2. **Check issue labels**: `good-first-issue`, `help-wanted`, `bug`
+3. **Read contribution guidelines**: `CONTRIBUTING.md` (when created)
+4. **Join discussions**: GitHub Discussions for architecture questions
+5. **Submit PRs**: Follow conventional commits format
 
-Completed phases:
-- Phase 0: Project Setup ✅
-- Phase 1: Local Development Environment ✅
-- Phase 2: eBPF Development Environment ✅
-- Phase 3: DHCP Fast Path POC ✅
-- Phase 4: State Management (Stub) ✅
-- Phase 5: Observability & Metrics ✅
-- Phase 6: BNG Core Features ✅
-- Phase 7: Production Readiness ✅
-
-Current priorities:
-1. Production deployment and hardening
-2. Performance optimization
-3. Integration testing with OLT hardware
-4. Documentation updates
-
-See `CHANGELOG.md` for detailed feature list.
+**Priority areas for contributors:**
+- Test coverage improvements
+- Bug fixes (good first issues)
+- Documentation
+- Performance optimizations
 
 ---
 
-**Status**: v0.2.0 released
-**Last Updated**: 22 Jan 2026
+## 📚 References
+
+- **Changelog**: [CHANGELOG.md](./CHANGELOG.md) for detailed version history
+- **Architecture**: [docs/ebpf-dhcp-architecture.md](./docs/ebpf-dhcp-architecture.md)
+- **Features**: [docs/FEATURES.md](./docs/FEATURES.md) for complete feature spec
+- **GitHub Issues**: [codelaboratoryltd/bng/issues](https://github.com/codelaboratoryltd/bng/issues)
+- **Deployment**: [bng-edge-infra repository](https://github.com/codelaboratoryltd/bng-edge-infra)
+
+---
+
+**Last Updated**: 2026-01-26
+**Roadmap Owner**: @mgazza
+**Status**: Active development - v0.2.0 in production hardening
