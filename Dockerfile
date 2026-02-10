@@ -53,6 +53,7 @@ FROM go-builder AS verify
 RUN mkdir -p cmd/verify-bpf/bpf && cp bpf/*.bpf.o cmd/verify-bpf/bpf/
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -tags bpfembed \
     -ldflags="-w -s" \
     -o /verify-bpf \
     ./cmd/verify-bpf
