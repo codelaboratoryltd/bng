@@ -339,11 +339,11 @@ func (m *Manager) provisionNTE(event *DiscoveryEvent) *ProvisioningResult {
 	}
 
 	// Check if subscriber exists for this NTE
-	sub, exists := m.nexusClient.GetSubscriberByNTE(nteID)
+	_, exists = m.nexusClient.GetSubscriberByNTE(nteID)
 	if !exists {
 		// Create default subscriber
 		subID := fmt.Sprintf("sub-%s", event.SerialNumber)
-		sub = &nexus.Subscriber{
+		sub := &nexus.Subscriber{
 			ID:          subID,
 			NTEID:       nteID,
 			DeviceID:    m.config.DeviceID,

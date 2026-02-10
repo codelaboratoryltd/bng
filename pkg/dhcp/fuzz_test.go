@@ -40,13 +40,9 @@ func FuzzParseOption82(f *testing.F) {
 			// Circuit-ID should be a copy, not a slice of original data
 			if len(info.CircuitID) > 0 {
 				// Verify we copied the data (mutation test)
-				originalLen := len(info.CircuitID)
 				info.CircuitID[0] ^= 0xFF
 				// Re-parse to ensure we made a copy
-				info2 := parseOption82(req)
-				if info2 != nil && len(info2.CircuitID) == originalLen {
-					// This is expected - we should have copied the data
-				}
+				_ = parseOption82(req)
 			}
 
 			// Remote-ID should also be a copy

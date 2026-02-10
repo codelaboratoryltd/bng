@@ -478,7 +478,19 @@ func (a *IPAllocator) UnmarshalJSON(data []byte) error {
 	// Recalculate allocated count
 	alloc.allocatedCount = big.NewInt(int64(len(state.Allocated)))
 
-	*a = *alloc
+	// Copy fields individually to avoid copying the embedded sync.RWMutex.
+	a.baseIP = alloc.baseIP
+	a.baseMask = alloc.baseMask
+	a.prefixLen = alloc.prefixLen
+	a.poolPrefix = alloc.poolPrefix
+	a.bitmap = alloc.bitmap
+	a.totalPrefixes = alloc.totalPrefixes
+	a.allocatedCount = alloc.allocatedCount
+	a.step = alloc.step
+	a.nextFree = alloc.nextFree
+	a.allocated = alloc.allocated
+	a.indexToSubscriber = alloc.indexToSubscriber
+	a.isIPv6 = alloc.isIPv6
 	return nil
 }
 

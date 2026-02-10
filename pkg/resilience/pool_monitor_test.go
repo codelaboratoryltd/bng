@@ -7,26 +7,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// mockPoolProvider implements PoolInfoProvider for testing.
-type mockPoolProvider struct {
-	pools map[string]*PoolStatus
-}
-
-func (m *mockPoolProvider) GetPoolStatus(poolID string) (*PoolStatus, error) {
-	if status, ok := m.pools[poolID]; ok {
-		return status, nil
-	}
-	return nil, nil
-}
-
-func (m *mockPoolProvider) ListPools() []string {
-	poolIDs := make([]string, 0, len(m.pools))
-	for id := range m.pools {
-		poolIDs = append(poolIDs, id)
-	}
-	return poolIDs
-}
-
 func TestPoolMonitorLevelCalculation(t *testing.T) {
 	logger := zap.NewNop()
 	config := DefaultPartitionConfig()

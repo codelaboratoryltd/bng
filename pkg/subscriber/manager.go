@@ -129,7 +129,7 @@ func (m *Manager) CreateSession(ctx context.Context, req *SessionRequest) (*Sess
 		PONPort:        req.PONPort,
 		STag:           req.STag,
 		CTag:           req.CTag,
-		Type:           SessionType(req.Type),
+		Type:           req.Type,
 		Username:       req.Username,
 		State:          StateInit,
 		StartTime:      now,

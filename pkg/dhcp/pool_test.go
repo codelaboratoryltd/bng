@@ -217,7 +217,7 @@ func TestPoolManagerAddPool(t *testing.T) {
 	// Get pool should work
 	got := mgr.GetPool(1)
 	if got == nil {
-		t.Error("GetPool returned nil")
+		t.Fatal("GetPool returned nil")
 	}
 	if got.Name != "pool1" {
 		t.Errorf("Expected pool name 'pool1', got %s", got.Name)

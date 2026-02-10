@@ -583,9 +583,10 @@ func (am *AccountingManager) processPendingRecord(record *PendingAcctRecord) {
 		atomic.StoreUint64(&am.pendingQueueDepth, uint64(len(am.pendingRecords)))
 		am.pendingMu.Unlock()
 
-		if record.Request.StatusType == AcctStatusStop {
+		switch record.Request.StatusType {
+		case AcctStatusStop:
 			atomic.AddUint64(&am.stopTotal, 1)
-		} else if record.Request.StatusType == AcctStatusInterimUpdate {
+		case AcctStatusInterimUpdate:
 			atomic.AddUint64(&am.interimTotal, 1)
 		}
 		return

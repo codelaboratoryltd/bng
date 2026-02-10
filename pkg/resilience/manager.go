@@ -171,9 +171,33 @@ func (m *Manager) OnConflict(handler ConflictHandler) {
 func (m *Manager) Stats() PartitionStats {
 	m.stats.mu.RLock()
 	defer m.stats.mu.RUnlock()
-	stats := m.stats
-	stats.CurrentState = m.State()
-	return stats
+	// Copy fields individually to avoid copying the embedded sync.RWMutex.
+	return PartitionStats{
+		CurrentState:        m.State(),
+		PartitionStartTime:  m.stats.PartitionStartTime,
+		TotalPartitions:     m.stats.TotalPartitions,
+		TotalPartitionTime:  m.stats.TotalPartitionTime,
+		LastPartitionTime:   m.stats.LastPartitionTime,
+		PoolWarnings:        m.stats.PoolWarnings,
+		PoolCriticals:       m.stats.PoolCriticals,
+		PoolExhaustions:     m.stats.PoolExhaustions,
+		ShortLeasesIssued:   m.stats.ShortLeasesIssued,
+		RequestsQueued:      m.stats.RequestsQueued,
+		RequestsDequeued:    m.stats.RequestsDequeued,
+		RequestsExpired:     m.stats.RequestsExpired,
+		QueueHighWaterMark:  m.stats.QueueHighWaterMark,
+		ConflictsDetected:   m.stats.ConflictsDetected,
+		ConflictsResolved:   m.stats.ConflictsResolved,
+		LocalWins:           m.stats.LocalWins,
+		RemoteWins:          m.stats.RemoteWins,
+		DegradedAuthsIssued: m.stats.DegradedAuthsIssued,
+		ReauthsCompleted:    m.stats.ReauthsCompleted,
+		ReauthsFailed:       m.stats.ReauthsFailed,
+		AcctRecordsBuffered: m.stats.AcctRecordsBuffered,
+		AcctRecordsSynced:   m.stats.AcctRecordsSynced,
+		AcctRecordsDropped:  m.stats.AcctRecordsDropped,
+		AcctBufferHighWater: m.stats.AcctBufferHighWater,
+	}
 }
 
 // healthCheckLoop periodically checks connectivity to remote services.
@@ -421,7 +445,7 @@ func (m *Manager) resolveConflict(ctx context.Context, conflict *AllocationConfl
 	// Check context cancellation
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("context cancelled while resolving conflict for IP %s: %w", conflict.IP, ctx.Err())
+		return fmt.Errorf("context canceled while resolving conflict for IP %s: %w", conflict.IP, ctx.Err())
 	default:
 	}
 

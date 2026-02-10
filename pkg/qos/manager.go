@@ -9,7 +9,6 @@ import (
 	"sync"
 
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
 	"go.uber.org/zap"
 )
@@ -41,8 +40,6 @@ type Manager struct {
 
 	// eBPF resources
 	collection  *ebpf.Collection
-	egressLink  link.Link
-	ingressLink link.Link
 	qosEgress   *ebpf.Map
 	qosIngress  *ebpf.Map
 	qosStatsMap *ebpf.Map

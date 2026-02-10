@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 	"github.com/codelaboratoryltd/bng/pkg/dhcp"
 	"github.com/codelaboratoryltd/bng/pkg/dhcpv6"
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
@@ -521,9 +520,7 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		// Parse DNS servers
 		var dnsServers []string
 		if poolDNS != "" {
-			for _, dns := range splitAndTrim(poolDNS) {
-				dnsServers = append(dnsServers, dns)
-			}
+			dnsServers = append(dnsServers, splitAndTrim(poolDNS)...)
 		}
 
 		peerPool, err = pool.NewPeerPool(pool.PeerPoolConfig{
@@ -820,7 +817,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		})
 
 		logger.Info("Starting metrics server", zap.String("addr", metricsAddr))
-		if err := http.ListenAndServe(metricsAddr, mux); err != nil {
+		server := &http.Server{
+			Addr:              metricsAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		if err := server.ListenAndServe(); err != nil {
 			logger.Error("Metrics server error", zap.Error(err))
 		}
 	}()
@@ -1033,38 +1035,4 @@ func parsePort(s string, defaultPort int) int {
 		return defaultPort
 	}
 	return port
-}
-
-// buildAuthConfig creates device authentication configuration from CLI flags.
-// The logger parameter is used to warn about unknown auth modes.
-func buildAuthConfig(logger *zap.Logger) deviceauth.Config {
-	config := deviceauth.DefaultConfig()
-
-	switch authMode {
-	case "none", "":
-		config.Mode = deviceauth.AuthModeNone
-
-	case "psk":
-		config.Mode = deviceauth.AuthModePSK
-		config.PSK = &deviceauth.PSKConfig{
-			Key:     authPSK,
-			KeyFile: authPSKFile,
-		}
-
-	case "mtls":
-		config.Mode = deviceauth.AuthModeMTLS
-		config.MTLS = &deviceauth.MTLSConfig{
-			CertFile:           authMTLSCert,
-			KeyFile:            authMTLSKey,
-			CAFile:             authMTLSCA,
-			ServerName:         authMTLSServerName,
-			InsecureSkipVerify: authMTLSInsecure,
-		}
-
-	default:
-		logger.Warn("Unknown auth mode, defaulting to none", zap.String("mode", authMode))
-		config.Mode = deviceauth.AuthModeNone
-	}
-
-	return config
 }
