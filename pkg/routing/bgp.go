@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -843,10 +842,4 @@ func (b *BGPController) ClearNeighbor(address net.IP, soft bool) error {
 	)
 
 	return nil
-}
-
-// parseASN parses an AS number string.
-func parseASN(s string) uint32 {
-	n, _ := strconv.ParseUint(s, 10, 32)
-	return uint32(n)
 }

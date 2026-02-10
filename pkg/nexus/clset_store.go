@@ -111,8 +111,7 @@ type DistributedStore struct {
 }
 
 type cacheEntry struct {
-	value     []byte
-	expiresAt time.Time
+	value []byte
 }
 
 // crdtBackend is the interface for CLSet/CRDT participation.

@@ -312,7 +312,6 @@ func (m *KeepAliveManager) terminateSessionAsync(sessionID uint16, reason string
 type SessionKeepAlive struct {
 	session *Session
 	lcp     *LCPStateMachine
-	manager *KeepAliveManager
 	config  KeepAliveConfig
 	logger  *zap.Logger
 

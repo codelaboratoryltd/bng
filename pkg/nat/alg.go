@@ -445,36 +445,9 @@ func (s *SIPALG) rewriteSIPHeader(conn *ALGConnection, line string, outbound boo
 			strings.HasPrefix(lowerLine, "contact:") ||
 			strings.HasPrefix(lowerLine, "c=") ||
 			strings.HasPrefix(lowerLine, "o=") {
-			return strings.Replace(line, oldIP, newIP, -1)
+			return strings.ReplaceAll(line, oldIP, newIP)
 		}
 	}
 
 	return line
-}
-
-// createRTPMapping creates dynamic mappings for RTP/RTCP media streams
-func (s *SIPALG) createRTPMapping(conn *ALGConnection, mediaPort uint16) {
-	// RTP typically uses even ports, RTCP uses the next odd port
-	rtpMapping := &DynamicMapping{
-		PrivateIP:   conn.PrivateIP,
-		PrivatePort: mediaPort,
-		PublicIP:    conn.PublicIP,
-		PublicPort:  mediaPort, // Ideally preserve port or allocate from block
-		Protocol:    17,        // UDP
-		ParentConn:  conn,
-		ALGType:     ALGTypeSIP,
-	}
-	s.handler.AddDynamicMapping(rtpMapping)
-
-	// RTCP on port+1
-	rtcpMapping := &DynamicMapping{
-		PrivateIP:   conn.PrivateIP,
-		PrivatePort: mediaPort + 1,
-		PublicIP:    conn.PublicIP,
-		PublicPort:  mediaPort + 1,
-		Protocol:    17, // UDP
-		ParentConn:  conn,
-		ALGType:     ALGTypeSIP,
-	}
-	s.handler.AddDynamicMapping(rtcpMapping)
 }

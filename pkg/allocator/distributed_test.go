@@ -407,7 +407,7 @@ func TestDistributedAllocator_GetByPrefix(t *testing.T) {
 		IP:   net.ParseIP("10.0.0.100"),
 		Mask: net.CIDRMask(32, 32),
 	}
-	subscriberID, ok = da.GetByPrefix(unallocated)
+	_, ok = da.GetByPrefix(unallocated)
 	assert.False(t, ok)
 }
 

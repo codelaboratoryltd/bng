@@ -13,5 +13,5 @@ var (
 	ErrBSSUnavailable = errors.New("BSS unavailable")
 
 	// ErrNexusUnavailable is returned when Nexus is unreachable
-	ErrNexusUnavailable = errors.New("Nexus unavailable")
+	ErrNexusUnavailable = errors.New("nexus unavailable")
 )

@@ -383,7 +383,7 @@ func (r *Resolver) forwardQuery(ctx context.Context, query *Query) (*Response, e
 	// Convert to our Response type
 	response := &Response{
 		Query:     query,
-		Rcode:     int(respMsg.Header.RCode),
+		Rcode:     int(respMsg.RCode),
 		FromCache: false,
 	}
 

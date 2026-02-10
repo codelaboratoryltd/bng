@@ -58,10 +58,8 @@ func NewRetentionManager(defaultDays int, categoryDays map[string]int) *Retentio
 		legalHolds:    make([]*LegalHold, 0),
 	}
 
-	if categoryDays != nil {
-		for k, v := range categoryDays {
-			rm.categoryDays[k] = v
-		}
+	for k, v := range categoryDays {
+		rm.categoryDays[k] = v
 	}
 
 	return rm

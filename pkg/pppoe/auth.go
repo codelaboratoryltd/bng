@@ -4,9 +4,7 @@ package pppoe
 
 import (
 	"context"
-	"crypto/md5"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -527,24 +525,6 @@ func (a *Authenticator) authenticate(username, password string, chapResponse []b
 	}
 
 	return result
-}
-
-// verifyCHAPResponse verifies a CHAP-MD5 response locally
-// This is used when RADIUS is not available
-func (a *Authenticator) verifyCHAPResponse(password string, response []byte) bool {
-	if len(response) != 16 { // MD5 produces 16 bytes
-		return false
-	}
-
-	// CHAP-MD5 response = MD5(ID || Password || Challenge)
-	h := md5.New()
-	h.Write([]byte{a.chapID})
-	h.Write([]byte(password))
-	h.Write(a.challenge)
-	expected := h.Sum(nil)
-
-	// Use constant-time comparison
-	return subtle.ConstantTimeCompare(expected, response) == 1
 }
 
 // Rate limiting
