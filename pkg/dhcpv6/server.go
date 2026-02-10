@@ -60,8 +60,6 @@ type Server struct {
 // AddressPool manages IPv6 address allocation
 type AddressPool struct {
 	network           *net.IPNet
-	startOffset       uint64
-	endOffset         uint64
 	preferredLifetime uint32
 	validLifetime     uint32
 	allocated         map[string]net.IP // DUID string -> IP
@@ -529,11 +527,9 @@ func (s *Server) handleConfirm(msg *Message, addr *net.UDPAddr) {
 		return
 	}
 
-	clientDUID := string(clientIDOpt.Data)
-
 	// Check if we have a binding for this client
 	s.leasesMu.RLock()
-	lease, hasLease := s.leases[clientDUID]
+	lease, hasLease := s.leases[string(clientIDOpt.Data)]
 	s.leasesMu.RUnlock()
 
 	// Verify addresses in IA_NA options are valid for this link
@@ -1172,15 +1168,4 @@ func (s *Server) getValidLifetime() uint32 {
 		return s.prefixPool.validLifetime
 	}
 	return 7200 // Default 2 hours
-}
-
-// getPrefixLength returns the prefix length for prefix delegation.
-func (s *Server) getPrefixLength() int {
-	if s.prefixAllocator != nil {
-		return s.prefixAllocator.PrefixLength()
-	}
-	if s.prefixPool != nil {
-		return int(s.prefixPool.delegationLength)
-	}
-	return 60 // Default /60
 }

@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     llvm-14 \
     libbpf-dev \
     linux-headers-generic \
+    gcc-multilib \
     make \
     && rm -rf /var/lib/apt/lists/*
 
@@ -43,6 +44,19 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -ldflags="-w -s" \
     -o /bng \
     ./cmd/bng
+
+# Stage 2b: Build BPF kernel verifier binary
+FROM go-builder AS verify
+
+# go:embed paths are relative to the source file, so place .bpf.o files
+# alongside the verify-bpf command source.
+RUN mkdir -p cmd/verify-bpf/bpf && cp bpf/*.bpf.o cmd/verify-bpf/bpf/
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -tags bpfembed \
+    -ldflags="-w -s" \
+    -o /verify-bpf \
+    ./cmd/verify-bpf
 
 # Stage 3: Runtime image
 FROM alpine:3.19

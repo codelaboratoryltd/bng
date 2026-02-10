@@ -183,25 +183,6 @@ func DefaultIPFIXConfig() IPFIXConfig {
 const (
 	ipfixTemplateNATMapping = 256
 	ipfixTemplateSession    = 257
-
-	// Standard IPFIX Information Elements
-	ieSourceIPv4Address        = 8
-	ieDestinationIPv4Address   = 12
-	ieSourceTransportPort      = 7
-	ieDestinationTransportPort = 11
-	ieProtocolIdentifier       = 4
-	ieFlowStartMilliseconds    = 152
-	ieFlowEndMilliseconds      = 153
-	ieOctetDeltaCount          = 1
-	iePacketDeltaCount         = 2
-
-	// Enterprise-specific for NAT (RFC 7659)
-	ieNATPoolID                        = 283
-	ieNATPoolName                      = 284
-	iePostNATSourceIPv4Address         = 225
-	iePostNATDestinationIPv4Address    = 226
-	iePostNAPTSourceTransportPort      = 227
-	iePostNAPTDestinationTransportPort = 228
 )
 
 // NewIPFIXExporter creates a new IPFIX exporter.
@@ -424,9 +405,6 @@ func (e *JSONExporter) Close() error {
 
 // FileExporter exports audit events to a file (for local persistence).
 type FileExporter struct {
-	config FileExportConfig
-	logger *zap.Logger
-	mu     sync.Mutex
 }
 
 // FileExportConfig holds file exporter configuration.
@@ -459,7 +437,6 @@ type KafkaExporter struct {
 	config KafkaConfig
 	logger *zap.Logger
 	// writer *kafka.Writer // Would use actual Kafka client
-	mu sync.Mutex
 }
 
 // KafkaConfig holds Kafka exporter configuration.

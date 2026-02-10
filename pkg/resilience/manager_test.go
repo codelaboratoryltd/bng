@@ -2,6 +2,7 @@ package resilience
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -10,16 +11,27 @@ import (
 
 // mockHealthChecker is a mock implementation of HealthChecker.
 type mockHealthChecker struct {
+	mu          sync.Mutex
 	nexusError  error
 	radiusError error
 }
 
 func (m *mockHealthChecker) CheckNexus(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.nexusError
 }
 
 func (m *mockHealthChecker) CheckRADIUS(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.radiusError
+}
+
+func (m *mockHealthChecker) setNexusError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nexusError = err
 }
 
 func TestManagerState(t *testing.T) {
@@ -61,9 +73,12 @@ func TestManagerPartitionTransition(t *testing.T) {
 	manager := NewManager(config, "test-site", healthChecker, logger)
 
 	// Track state changes
+	var mu sync.Mutex
 	var stateChanges []PartitionEvent
 	manager.OnPartitionChange(func(event PartitionEvent) {
+		mu.Lock()
 		stateChanges = append(stateChanges, event)
+		mu.Unlock()
 	})
 
 	// Start manager
@@ -84,7 +99,10 @@ func TestManagerPartitionTransition(t *testing.T) {
 		t.Error("Expected to be partitioned")
 	}
 
-	if len(stateChanges) == 0 {
+	mu.Lock()
+	changes := len(stateChanges)
+	mu.Unlock()
+	if changes == 0 {
 		t.Error("Expected at least one state change event")
 	}
 
@@ -94,7 +112,7 @@ func TestManagerPartitionTransition(t *testing.T) {
 	}
 
 	// Clear errors to simulate recovery
-	healthChecker.nexusError = nil
+	healthChecker.setNexusError(nil)
 
 	// Wait for recovery
 	time.Sleep(200 * time.Millisecond)

@@ -46,11 +46,10 @@ type Agent struct {
 	deviceConfig *DeviceConfig
 
 	// State
-	mu           sync.RWMutex
-	state        State
-	deviceID     string
-	lastSyncTime time.Time
-	startTime    time.Time
+	mu        sync.RWMutex
+	state     State
+	deviceID  string
+	startTime time.Time
 
 	// Subscribers cache
 	subscribers   map[string]*Subscriber
@@ -61,8 +60,7 @@ type Agent struct {
 	ntesMu sync.RWMutex
 
 	// Allocations cache
-	allocations   map[string]*Allocation
-	allocationsMu sync.RWMutex
+	allocations map[string]*Allocation
 
 	// Handlers
 	stateChangeHandlers  []StateChangeHandler
@@ -224,7 +222,7 @@ func (a *Agent) bootstrapLoop() {
 	resp, err := a.bootstrap.RegisterWithRetry(a.ctx)
 	if err != nil {
 		if a.ctx.Err() != nil {
-			a.logger.Info("Bootstrap cancelled")
+			a.logger.Info("Bootstrap canceled")
 			return
 		}
 		a.logger.Error("Bootstrap failed", zap.Error(err))

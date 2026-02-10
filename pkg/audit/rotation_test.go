@@ -264,8 +264,14 @@ func TestRotatingFileExporter_Close(t *testing.T) {
 func TestRotatingFileExporter_InvalidDirectory(t *testing.T) {
 	logger := zap.NewNop()
 
+	// Create a regular file, then try to use it as a parent directory.
+	// os.MkdirAll fails even as root because a file can't be a directory.
+	tmpDir := t.TempDir()
+	blocker := filepath.Join(tmpDir, "notadir")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0644))
+
 	config := audit.RotationConfig{
-		Directory:      "/nonexistent/invalid/path/that/does/not/exist",
+		Directory:      filepath.Join(blocker, "subdir"),
 		FilePrefix:     "test-audit",
 		MaxSizeBytes:   1024 * 1024,
 		MaxAgeDuration: time.Hour,

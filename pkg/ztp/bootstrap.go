@@ -372,7 +372,7 @@ func getMACAddress(ifaceName string) (string, error) {
 		return "", err
 	}
 
-	if iface.HardwareAddr == nil || len(iface.HardwareAddr) == 0 {
+	if len(iface.HardwareAddr) == 0 {
 		return "", fmt.Errorf("interface %s has no MAC address", ifaceName)
 	}
 
@@ -391,7 +391,7 @@ func findPrimaryMAC() (string, error) {
 		if iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		if iface.HardwareAddr == nil || len(iface.HardwareAddr) == 0 {
+		if len(iface.HardwareAddr) == 0 {
 			continue
 		}
 		// Skip virtual interfaces

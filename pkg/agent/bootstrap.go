@@ -423,11 +423,12 @@ func (b *Bootstrap) RegisterWithRetry(ctx context.Context) (*RegistrationRespons
 				return resp, nil
 			}
 
-			if resp.Status == "pending" {
+			switch resp.Status {
+			case "pending":
 				b.logger.Info("Device registration pending approval",
 					zap.String("message", resp.Message),
 				)
-			} else if resp.Status == "rejected" {
+			case "rejected":
 				return nil, fmt.Errorf("registration rejected: %s", resp.Message)
 			}
 		} else {

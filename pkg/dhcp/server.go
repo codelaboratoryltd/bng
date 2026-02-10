@@ -175,7 +175,7 @@ func generateSessionID() string {
 // Returns nil if Option 82 is not present
 func parseOption82(req *dhcpv4.DHCPv4) *RelayAgentInfo {
 	opt82 := req.Options.Get(dhcpv4.OptionRelayAgentInformation)
-	if opt82 == nil || len(opt82) == 0 {
+	if len(opt82) == 0 {
 		return nil
 	}
 
@@ -369,7 +369,8 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		if s.httpAllocator != nil && s.httpAllocatorPool != "" {
 			// First, LOOKUP existing allocation (doesn't create one)
 			allocatedIP, _, _, err := s.httpAllocator.LookupIPv4(context.Background(), macStr, s.httpAllocatorPool)
-			if err == nil {
+			switch err {
+			case nil:
 				// Subscriber has an existing allocation - they are activated
 				ip = allocatedIP
 				s.logger.Info("Found existing Nexus allocation (subscriber activated)",
@@ -384,7 +385,7 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 					zap.String("mac", macStr),
 					zap.String("pool", s.httpAllocatorPool),
 				)
-			} else {
+			default:
 				// Other error (network issue, etc) - log and fall back to local pool
 				s.logger.Warn("Nexus lookup failed, falling back to local pool",
 					zap.String("mac", macStr),
@@ -619,7 +620,7 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	}
 
 	// Issue #15: Add circuit-id to MAC mapping for fast path lookup (legacy hash-based)
-	if lease.CircuitID != nil && len(lease.CircuitID) > 0 && s.loader != nil {
+	if len(lease.CircuitID) > 0 && s.loader != nil {
 		macU64 := ebpf.MACToUint64(mac)
 		if err := s.loader.AddCircuitIDMapping(lease.CircuitID, macU64); err != nil {
 			s.logger.Warn("Failed to add circuit-id to MAC mapping to eBPF",
@@ -834,7 +835,7 @@ func (s *Server) handleRelease(req *dhcpv4.DHCPv4) {
 		}
 
 		// Issue #15: Remove circuit-id to MAC mapping if present
-		if lease.CircuitID != nil && len(lease.CircuitID) > 0 {
+		if len(lease.CircuitID) > 0 {
 			if err := s.loader.RemoveCircuitIDMapping(lease.CircuitID); err != nil {
 				s.logger.Warn("Failed to remove circuit-id to MAC mapping",
 					zap.String("mac", mac.String()),
