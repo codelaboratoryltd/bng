@@ -1,6 +1,7 @@
 package resilience
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -44,16 +45,19 @@ func TestPoolMonitorAlerts(t *testing.T) {
 
 	monitor := NewPoolMonitor(config, logger)
 
+	var mu sync.Mutex
 	var receivedAlerts []struct {
 		pool  PoolStatus
 		level PoolUtilizationLevel
 	}
 
 	monitor.OnAlert(func(pool PoolStatus, level PoolUtilizationLevel) {
+		mu.Lock()
 		receivedAlerts = append(receivedAlerts, struct {
 			pool  PoolStatus
 			level PoolUtilizationLevel
 		}{pool, level})
+		mu.Unlock()
 	})
 
 	// Create a pool status that should trigger warning
@@ -71,12 +75,20 @@ func TestPoolMonitorAlerts(t *testing.T) {
 	// Wait for async alert
 	time.Sleep(50 * time.Millisecond)
 
-	if len(receivedAlerts) != 1 {
-		t.Errorf("Expected 1 alert, got %d", len(receivedAlerts))
+	mu.Lock()
+	alertCount := len(receivedAlerts)
+	var firstLevel PoolUtilizationLevel
+	if alertCount > 0 {
+		firstLevel = receivedAlerts[0].level
+	}
+	mu.Unlock()
+
+	if alertCount != 1 {
+		t.Errorf("Expected 1 alert, got %d", alertCount)
 	}
 
-	if len(receivedAlerts) > 0 && receivedAlerts[0].level != LevelWarning {
-		t.Errorf("Expected warning level, got %v", receivedAlerts[0].level)
+	if alertCount > 0 && firstLevel != LevelWarning {
+		t.Errorf("Expected warning level, got %v", firstLevel)
 	}
 }
 

@@ -404,12 +404,15 @@ func (m *Manager) HandleDisconnect(serialNumber string) {
 	m.nteStates[serialNumber] = NTEStateDisconnected
 	m.mu.Unlock()
 
-	// Update NTE state in Nexus
+	// Update NTE state in Nexus.
+	// Copy the NTE before mutating — GetNTEBySerial returns a pointer to the
+	// shared cache entry which may be read concurrently by watcher callbacks.
 	nte, exists := m.nexusClient.GetNTEBySerial(serialNumber)
 	if exists {
-		nte.State = "disconnected"
-		nte.LastSeen = time.Now().UTC()
-		if err := m.nexusClient.SaveNTE(context.Background(), nte); err != nil {
+		nteCopy := *nte
+		nteCopy.State = "disconnected"
+		nteCopy.LastSeen = time.Now().UTC()
+		if err := m.nexusClient.SaveNTE(context.Background(), &nteCopy); err != nil {
 			m.logger.Warn("Failed to update NTE disconnect state",
 				zap.String("serial", serialNumber),
 				zap.Error(err),
