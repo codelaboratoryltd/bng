@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y \
     llvm-14 \
     libbpf-dev \
     linux-headers-generic \
+    gcc-multilib \
     make \
     && rm -rf /var/lib/apt/lists/*
 
