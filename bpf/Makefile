@@ -22,7 +22,7 @@ CFLAGS := -O2 -g -Wall -Werror -Wno-pass-failed \
 # libbpf includes
 CFLAGS += -I/usr/include
 
-.PHONY: all clean vmlinux
+.PHONY: all clean vmlinux verify verify-kernel
 
 all: $(BPF_PROGRAMS)
 
@@ -72,11 +72,18 @@ verify: $(BPF_PROGRAMS)
 		fi; \
 	done
 
+# Run BPF programs through the kernel verifier via Docker
+verify-kernel:
+	@echo "Building and running BPF kernel verifier..."
+	cd .. && docker build --target verify -t bng-verify .
+	docker run --privileged --rm bng-verify /verify-bpf
+
 help:
 	@echo "eBPF Makefile Targets:"
-	@echo "  make           - Build all eBPF programs"
-	@echo "  make vmlinux   - Generate vmlinux.h (kernel types)"
-	@echo "  make clean     - Remove build artifacts"
-	@echo "  make info      - Show build configuration"
-	@echo "  make verify    - Verify compiled BPF objects"
-	@echo "  make help      - Show this help"
+	@echo "  make               - Build all eBPF programs"
+	@echo "  make vmlinux       - Generate vmlinux.h (kernel types)"
+	@echo "  make clean         - Remove build artifacts"
+	@echo "  make info          - Show build configuration"
+	@echo "  make verify        - Verify compiled BPF objects (ELF check)"
+	@echo "  make verify-kernel - Run BPF kernel verifier via Docker"
+	@echo "  make help          - Show this help"
