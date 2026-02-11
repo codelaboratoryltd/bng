@@ -1264,7 +1264,8 @@ func TestHTTPAllocatorConcurrentPoolAccess(t *testing.T) {
 	callCount := 0
 	syncChan := make(chan bool, 5) // Buffered channel for goroutine synchronization
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/pools/concurrent-pool" {
+		switch r.URL.Path {
+		case "/api/v1/pools/concurrent-pool":
 			callCount++
 			<-syncChan                        // Wait for all goroutines to be ready
 			time.Sleep(50 * time.Millisecond) // Simulate slow response
@@ -1273,7 +1274,7 @@ func TestHTTPAllocatorConcurrentPoolAccess(t *testing.T) {
 				CIDR:   "10.0.0.0/24",
 				Prefix: 24,
 			})
-		} else if r.URL.Path == "/api/v1/allocations" {
+		case "/api/v1/allocations":
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(AllocationResponse{
 				IP: "10.0.0.1",
@@ -1336,13 +1337,14 @@ func TestHTTPAllocatorIPv4GatewayForDifferentSubnetSizes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/v1/pools/test" {
+				switch r.URL.Path {
+				case "/api/v1/pools/test":
 					json.NewEncoder(w).Encode(PoolResponse{
 						ID:     "test",
 						CIDR:   tt.cidr,
 						Prefix: 24,
 					})
-				} else if r.URL.Path == "/api/v1/allocations" {
+				case "/api/v1/allocations":
 					json.NewEncoder(w).Encode(AllocationResponse{
 						PoolID:       "test",
 						SubscriberID: "sub-123",
