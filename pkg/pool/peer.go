@@ -4,6 +4,7 @@ package pool
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -166,15 +167,12 @@ func generateAvailableIPs(network *net.IPNet, gateway net.IP) []net.IP {
 		return ips
 	}
 
-	for i := 1; i <= numHosts; i++ {
-		ip := make(net.IP, 4)
-		copy(ip, networkIP)
+	baseInt := binary.BigEndian.Uint32(networkIP)
 
-		// Add host portion
-		ip[0] += byte((i >> 24) & 0xFF)
-		ip[1] += byte((i >> 16) & 0xFF)
-		ip[2] += byte((i >> 8) & 0xFF)
-		ip[3] += byte(i & 0xFF)
+	for i := 1; i <= numHosts; i++ {
+		ipInt := baseInt + uint32(i)
+		ip := make(net.IP, 4)
+		binary.BigEndian.PutUint32(ip, ipInt)
 
 		// Skip gateway
 		if ip.Equal(gateway) {
