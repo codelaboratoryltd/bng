@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -66,11 +67,12 @@ var (
 	leaseTime   time.Duration
 
 	// RADIUS configuration
-	radiusServers string
-	radiusSecret  string
-	radiusNASID   string
-	radiusTimeout time.Duration
-	radiusEnabled bool
+	radiusServers    string
+	radiusSecret     string
+	radiusSecretFile string
+	radiusNASID      string
+	radiusTimeout    time.Duration
+	radiusEnabled    bool
 
 	// QoS configuration
 	qosBPFPath string
@@ -191,7 +193,9 @@ func init() {
 	runCmd.Flags().StringVar(&radiusServers, "radius-servers", "",
 		"RADIUS server addresses (comma-separated, e.g., 'radius1.example.com:1812,radius2.example.com:1812')")
 	runCmd.Flags().StringVar(&radiusSecret, "radius-secret", "",
-		"RADIUS shared secret")
+		"RADIUS shared secret (DEPRECATED: visible in ps output, use --radius-secret-file instead)")
+	runCmd.Flags().StringVar(&radiusSecretFile, "radius-secret-file", "",
+		"Path to file containing RADIUS shared secret")
 	runCmd.Flags().StringVar(&radiusNASID, "radius-nas-id", "bng",
 		"RADIUS NAS-Identifier")
 	runCmd.Flags().DurationVar(&radiusTimeout, "radius-timeout", 3*time.Second,
@@ -619,11 +623,18 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		)
 	}
 
+	// Resolve RADIUS secret from file or direct flag
+	resolvedRadiusSecret := resolveSecret(radiusSecret, radiusSecretFile, "radius-secret", "radius-secret-file", logger)
+
+	// Resolve auth PSK from file or direct flag
+	resolvedAuthPSK := resolveSecret(authPSK, authPSKFile, "auth-psk", "auth-psk-file", logger)
+	_ = resolvedAuthPSK // used when device auth is wired up
+
 	// Initialize RADIUS client if enabled
 	var radiusClient *radius.Client
 	var policyMgr *radius.PolicyManager
-	if radiusEnabled && radiusServers != "" && radiusSecret != "" {
-		servers := parseRADIUSServers(radiusServers, radiusSecret)
+	if radiusEnabled && radiusServers != "" && resolvedRadiusSecret != "" {
+		servers := parseRADIUSServers(radiusServers, resolvedRadiusSecret)
 		if len(servers) > 0 {
 			radiusClient, err = radius.NewClient(radius.ClientConfig{
 				Servers: servers,
@@ -1044,4 +1055,35 @@ func parsePort(s string, defaultPort int) int {
 		return defaultPort
 	}
 	return port
+}
+
+// resolveSecret reads a secret from a file if the file flag is set,
+// falling back to the direct string flag. When the direct flag is used,
+// a deprecation warning is logged because CLI arguments are visible in
+// process listings (ps output).
+func resolveSecret(direct, filePath, directFlag, fileFlag string, logger *zap.Logger) string {
+	if filePath != "" {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			logger.Error("Failed to read secret file",
+				zap.String("flag", fileFlag),
+				zap.String("path", filePath),
+				zap.Error(err),
+			)
+			return ""
+		}
+		secret := strings.TrimSpace(string(data))
+		if direct != "" {
+			logger.Warn("Both --"+directFlag+" and --"+fileFlag+" set; using file",
+				zap.String("file", filePath),
+			)
+		}
+		return secret
+	}
+	if direct != "" {
+		logger.Warn("--"+directFlag+" is deprecated: secret is visible in process listings. Use --"+fileFlag+" instead.",
+			zap.String("flag", directFlag),
+		)
+	}
+	return direct
 }
