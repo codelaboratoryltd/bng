@@ -70,7 +70,7 @@ var _ = Describe("CLSetStore", func() {
 
 		It("should return ErrNotFound for missing keys", func() {
 			_, err := store.Get(ctx, "nonexistent")
-			Expect(err).To(Equal(nexus.ErrNotFound))
+			Expect(err).To(MatchError(nexus.ErrNotFound))
 		})
 
 		It("should overwrite existing values", func() {
@@ -90,7 +90,7 @@ var _ = Describe("CLSetStore", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			_, err = store.Get(ctx, "key1")
-			Expect(err).To(Equal(nexus.ErrNotFound))
+			Expect(err).To(MatchError(nexus.ErrNotFound))
 		})
 
 		It("should not error when deleting nonexistent key", func() {
@@ -258,7 +258,7 @@ var _ = Describe("CLSetStore", func() {
 			store.ApplyRemoteChange("test/key1", nil, true)
 
 			_, err := store.Get(ctx, "key1")
-			Expect(err).To(Equal(nexus.ErrNotFound))
+			Expect(err).To(MatchError(nexus.ErrNotFound))
 		})
 
 		It("should notify watchers for remote changes", func() {

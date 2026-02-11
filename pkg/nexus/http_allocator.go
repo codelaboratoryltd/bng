@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -204,7 +205,7 @@ func (h *HTTPAllocator) LookupIPv4(ctx context.Context, subscriberID, poolID str
 }
 
 // ErrNoAllocation is returned when a subscriber has no allocation in Nexus.
-var ErrNoAllocation = fmt.Errorf("no allocation found")
+var ErrNoAllocation = errors.New("no allocation found")
 
 // AllocateIPv6 allocates an IPv6 address/prefix from the specified pool via Nexus API.
 // Returns the allocated IP, the prefix (as IPNet), and any error.

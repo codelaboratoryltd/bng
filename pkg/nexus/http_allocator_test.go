@@ -3,6 +3,7 @@ package nexus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -181,7 +182,7 @@ func TestHTTPAllocatorLookupIPv4(t *testing.T) {
 
 	// Test non-existing allocation
 	_, _, _, err = allocator.LookupIPv4(ctx, "new-sub", "test-pool")
-	if err != ErrNoAllocation {
+	if !errors.Is(err, ErrNoAllocation) {
 		t.Errorf("expected ErrNoAllocation, got %v", err)
 	}
 }
@@ -257,7 +258,7 @@ func TestHTTPAllocatorGetAllocation(t *testing.T) {
 
 	// Test non-existing allocation
 	_, err = allocator.GetAllocation(ctx, "not-found")
-	if err != ErrNotFound {
+	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
 }
