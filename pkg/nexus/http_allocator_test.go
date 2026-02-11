@@ -1393,6 +1393,117 @@ func TestHTTPAllocatorMalformedCIDRInPool(t *testing.T) {
 	}
 }
 
+func TestHTTPAllocatorPoolGatewayAndDNSFromResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/pools/custom-pool":
+			json.NewEncoder(w).Encode(PoolResponse{
+				ID:      "custom-pool",
+				CIDR:    "10.1.0.0/24",
+				Prefix:  24,
+				Gateway: "10.1.0.254",
+				DNS:     []string{"1.1.1.1", "1.0.0.1"},
+			})
+		case "/api/v1/allocations":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(AllocationResponse{
+				PoolID:       "custom-pool",
+				SubscriberID: "sub-1",
+				IP:           "10.1.0.100",
+				Timestamp:    time.Now(),
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	allocator := NewHTTPAllocator(server.URL)
+	ctx := context.Background()
+
+	ip, mask, gateway, err := allocator.AllocateIPv4(ctx, "sub-1", "custom-pool")
+	if err != nil {
+		t.Fatalf("AllocateIPv4 failed: %v", err)
+	}
+
+	if ip.String() != "10.1.0.100" {
+		t.Errorf("expected IP 10.1.0.100, got %s", ip.String())
+	}
+
+	if mask == nil {
+		t.Fatal("expected non-nil mask")
+	}
+
+	// Gateway should come from the pool response, not default
+	if gateway.String() != "10.1.0.254" {
+		t.Errorf("expected gateway 10.1.0.254 from pool, got %s", gateway.String())
+	}
+
+	// Verify DNS is also parsed
+	poolInfo, err := allocator.GetPoolInfo(ctx, "custom-pool")
+	if err != nil {
+		t.Fatalf("GetPoolInfo failed: %v", err)
+	}
+
+	if len(poolInfo.DNS) != 2 {
+		t.Fatalf("expected 2 DNS servers, got %d", len(poolInfo.DNS))
+	}
+	if poolInfo.DNS[0].String() != "1.1.1.1" {
+		t.Errorf("expected DNS[0] 1.1.1.1, got %s", poolInfo.DNS[0].String())
+	}
+	if poolInfo.DNS[1].String() != "1.0.0.1" {
+		t.Errorf("expected DNS[1] 1.0.0.1, got %s", poolInfo.DNS[1].String())
+	}
+}
+
+func TestHTTPAllocatorPoolWithoutGatewayOrDNS(t *testing.T) {
+	// Pool without gateway/DNS should use defaults
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/pools/bare-pool":
+			json.NewEncoder(w).Encode(PoolResponse{
+				ID:     "bare-pool",
+				CIDR:   "10.2.0.0/24",
+				Prefix: 24,
+			})
+		case "/api/v1/allocations":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(AllocationResponse{
+				PoolID:       "bare-pool",
+				SubscriberID: "sub-1",
+				IP:           "10.2.0.50",
+				Timestamp:    time.Now(),
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	allocator := NewHTTPAllocator(server.URL)
+	ctx := context.Background()
+
+	_, _, gateway, err := allocator.AllocateIPv4(ctx, "sub-1", "bare-pool")
+	if err != nil {
+		t.Fatalf("AllocateIPv4 failed: %v", err)
+	}
+
+	// Gateway should default to first usable IP
+	if gateway.String() != "10.2.0.1" {
+		t.Errorf("expected default gateway 10.2.0.1, got %s", gateway.String())
+	}
+
+	poolInfo, err := allocator.GetPoolInfo(ctx, "bare-pool")
+	if err != nil {
+		t.Fatalf("GetPoolInfo failed: %v", err)
+	}
+
+	// DNS should be empty when not in response
+	if len(poolInfo.DNS) != 0 {
+		t.Errorf("expected no DNS servers, got %d", len(poolInfo.DNS))
+	}
+}
+
 func TestHTTPAllocatorEmptyCIDR(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(PoolResponse{

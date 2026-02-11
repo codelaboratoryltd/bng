@@ -489,6 +489,30 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("cannot connect to Nexus at %s: %w", nexusURL, err)
 		}
 
+		// Fetch pool info and use Nexus gateway/DNS if available (#95)
+		poolInfo, err := httpAllocator.GetPoolInfo(ctx, nexusPoolID)
+		if err != nil {
+			return fmt.Errorf("cannot fetch pool %s from Nexus: %w", nexusPoolID, err)
+		}
+
+		if poolInfo.Gateway != nil && !cmd.Flags().Changed("pool-gateway") {
+			poolGateway = poolInfo.Gateway.String()
+			logger.Info("Using gateway from Nexus pool",
+				zap.String("gateway", poolGateway),
+			)
+		}
+
+		if len(poolInfo.DNS) > 0 && !cmd.Flags().Changed("pool-dns") {
+			var dnsStrs []string
+			for _, ip := range poolInfo.DNS {
+				dnsStrs = append(dnsStrs, ip.String())
+			}
+			poolDNS = joinStrings(dnsStrs, ",")
+			logger.Info("Using DNS from Nexus pool",
+				zap.String("dns", poolDNS),
+			)
+		}
+
 		dhcpServer.SetHTTPAllocator(httpAllocator, nexusPoolID)
 		logger.Info("Connected to Nexus for distributed IP allocation",
 			zap.String("url", nexusURL),
@@ -988,6 +1012,17 @@ func trim(s string) string {
 		end--
 	}
 	return s[start:end]
+}
+
+func joinStrings(parts []string, sep string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	result := parts[0]
+	for _, p := range parts[1:] {
+		result += sep + p
+	}
+	return result
 }
 
 // parseRADIUSServers parses comma-separated RADIUS server addresses

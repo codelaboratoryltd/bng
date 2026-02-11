@@ -30,6 +30,7 @@ type PoolInfo struct {
 	CIDR    string
 	Gateway net.IP
 	Mask    net.IPMask
+	DNS     []net.IP
 }
 
 // AllocationRequest is the request body for creating an allocation.
@@ -49,9 +50,11 @@ type AllocationResponse struct {
 
 // PoolResponse is the response from pool endpoints.
 type PoolResponse struct {
-	ID     string `json:"id"`
-	CIDR   string `json:"cidr"`
-	Prefix int    `json:"prefix"`
+	ID      string   `json:"id"`
+	CIDR    string   `json:"cidr"`
+	Prefix  int      `json:"prefix"`
+	Gateway string   `json:"gateway,omitempty"`
+	DNS     []string `json:"dns,omitempty"`
 }
 
 // PoolsListResponse is the response from listing pools.
@@ -406,22 +409,43 @@ func (h *HTTPAllocator) getPoolInfo(ctx context.Context, poolID string) (*PoolIn
 		return nil, fmt.Errorf("invalid CIDR: %s", poolResp.CIDR)
 	}
 
-	// Default gateway is first usable IP in the network
-	gateway := make(net.IP, 4)
-	copy(gateway, ipNet.IP.To4())
-	gateway[3]++ // First usable IP
+	// Use gateway from Nexus pool if set, otherwise default to first usable IP
+	var gateway net.IP
+	if poolResp.Gateway != "" {
+		gateway = net.ParseIP(poolResp.Gateway)
+	}
+	if gateway == nil {
+		gateway = make(net.IP, 4)
+		copy(gateway, ipNet.IP.To4())
+		gateway[3]++ // First usable IP
+	}
+
+	// Parse DNS servers from Nexus pool response
+	var dnsServers []net.IP
+	for _, dns := range poolResp.DNS {
+		if ip := net.ParseIP(dns); ip != nil {
+			dnsServers = append(dnsServers, ip)
+		}
+	}
 
 	info := &PoolInfo{
 		ID:      poolResp.ID,
 		CIDR:    poolResp.CIDR,
 		Gateway: gateway,
 		Mask:    ipNet.Mask,
+		DNS:     dnsServers,
 	}
 
 	// Cache the info
 	h.pools[poolID] = info
 
 	return info, nil
+}
+
+// GetPoolInfo fetches pool configuration from Nexus (public accessor).
+// This allows callers to inspect pool-level settings like gateway and DNS.
+func (h *HTTPAllocator) GetPoolInfo(ctx context.Context, poolID string) (*PoolInfo, error) {
+	return h.getPoolInfo(ctx, poolID)
 }
 
 // CreatePool creates a new pool in Nexus.
