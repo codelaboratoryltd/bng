@@ -456,17 +456,34 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		zap.Uint32("pool_id", poolID),
 	)
 
-	// Build OFFER response
-	resp, err := dhcpv4.NewReplyFromRequest(req,
+	// Build OFFER response with pool metadata or sensible defaults (Nexus-only mode)
+	leaseTime := 24 * time.Hour
+	subnetMask := net.CIDRMask(24, 32)
+	var gateway net.IP
+	var dnsServers []net.IP
+	if pool != nil {
+		leaseTime = pool.LeaseTime
+		subnetMask = pool.SubnetMask
+		gateway = pool.Gateway
+		dnsServers = pool.DNSServers
+	}
+
+	opts := []dhcpv4.Modifier{
 		dhcpv4.WithMessageType(dhcpv4.MessageTypeOffer),
 		dhcpv4.WithYourIP(ip),
 		dhcpv4.WithServerIP(s.serverIP),
 		dhcpv4.WithOption(dhcpv4.OptServerIdentifier(s.serverIP)),
-		dhcpv4.WithOption(dhcpv4.OptIPAddressLeaseTime(pool.LeaseTime)),
-		dhcpv4.WithOption(dhcpv4.OptSubnetMask(pool.SubnetMask)),
-		dhcpv4.WithOption(dhcpv4.OptRouter(pool.Gateway)),
-		dhcpv4.WithOption(dhcpv4.OptDNS(pool.DNSServers...)),
-	)
+		dhcpv4.WithOption(dhcpv4.OptIPAddressLeaseTime(leaseTime)),
+		dhcpv4.WithOption(dhcpv4.OptSubnetMask(subnetMask)),
+	}
+	if gateway != nil {
+		opts = append(opts, dhcpv4.WithOption(dhcpv4.OptRouter(gateway)))
+	}
+	if len(dnsServers) > 0 {
+		opts = append(opts, dhcpv4.WithOption(dhcpv4.OptDNS(dnsServers...)))
+	}
+
+	resp, err := dhcpv4.NewReplyFromRequest(req, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build OFFER: %w", err)
 	}

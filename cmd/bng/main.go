@@ -498,6 +498,7 @@ func runBNG(cmd *cobra.Command, args []string) error {
 
 	// Initialize Peer Pool if peers are configured (Demo G - distributed allocation)
 	var peerPool *pool.PeerPool
+	var peerServer *http.Server
 	if len(peerAddrs) > 0 || peerDiscovery == "dns" {
 		// Determine node ID
 		nodeID := peerNodeID
@@ -545,13 +546,13 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		)
 
 		// Start peer pool HTTP API server
+		mux := http.NewServeMux()
+		peerPool.RegisterHandlers(mux)
+		peerServer = &http.Server{
+			Addr:    peerListenAddr,
+			Handler: mux,
+		}
 		go func() {
-			mux := http.NewServeMux()
-			peerPool.RegisterHandlers(mux)
-			peerServer := &http.Server{
-				Addr:    peerListenAddr,
-				Handler: mux,
-			}
 			logger.Info("Starting peer pool API server", zap.String("addr", peerListenAddr))
 			if err := peerServer.ListenAndServe(); err != http.ErrServerClosed {
 				logger.Error("Peer pool API server error", zap.Error(err))
@@ -894,6 +895,14 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if raServer != nil {
 		if err := raServer.Stop(); err != nil {
 			logger.Warn("Failed to stop SLAAC/RA daemon", zap.Error(err))
+		}
+	}
+	// Stop peer pool API server (Issue #77)
+	if peerServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := peerServer.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("Failed to stop peer pool API server", zap.Error(err))
 		}
 	}
 	// Stop HA syncer (Demo H)

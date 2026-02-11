@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/http"
 	"sync"
@@ -85,6 +86,11 @@ type HASyncer struct {
 	sseClients   map[string]chan *SyncMessage
 	sseClientsMu sync.RWMutex
 
+	// Reconnect backoff state
+	backoff    time.Duration
+	backoffMin time.Duration
+	backoffMax time.Duration
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -103,6 +109,9 @@ func NewHASyncer(config SyncConfig, store SessionStore, logger *zap.Logger) *HAS
 		pendingChanges:   make(chan *SyncMessage, 1000),
 		receivedSessions: make(map[string]*SessionState),
 		sseClients:       make(map[string]chan *SyncMessage),
+		backoff:          1 * time.Second,
+		backoffMin:       1 * time.Second,
+		backoffMax:       30 * time.Second,
 		ctx:              ctx,
 		cancel:           cancel,
 	}
@@ -517,6 +526,7 @@ func (s *HASyncer) connectToStream() error {
 	s.connected = true
 	s.stats.Connected = true
 	s.mu.Unlock()
+	s.resetBackoff()
 
 	s.logger.Info("Connected to active node SSE stream",
 		zap.String("partner", s.config.Partner.Endpoint),
@@ -633,12 +643,29 @@ func (s *HASyncer) handleSSEData(data []byte) error {
 	return nil
 }
 
-// waitReconnect waits for the reconnect interval.
+// waitReconnect waits with exponential backoff and jitter before reconnecting.
 func (s *HASyncer) waitReconnect() {
+	// Add 20% random jitter to avoid thundering herd
+	jitter := time.Duration(rand.Int63n(int64(s.backoff) / 5))
+	wait := s.backoff + jitter
+
+	s.logger.Debug("Waiting before reconnect", zap.Duration("backoff", wait))
+
 	select {
 	case <-s.ctx.Done():
-	case <-time.After(s.config.ReconnectInterval):
+	case <-time.After(wait):
 	}
+
+	// Double backoff for next attempt, capped at max
+	s.backoff *= 2
+	if s.backoff > s.backoffMax {
+		s.backoff = s.backoffMax
+	}
+}
+
+// resetBackoff resets the reconnect backoff to the minimum after a successful connection.
+func (s *HASyncer) resetBackoff() {
+	s.backoff = s.backoffMin
 }
 
 // recordError records an error in stats.
