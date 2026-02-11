@@ -621,7 +621,12 @@ func (s *Server) handlePAP(session *Session, data []byte) {
 		return
 	}
 
-	password := string(data[6+usernameLen : 6+usernameLen+passwordLen])
+	passwordBytes := make([]byte, passwordLen)
+	copy(passwordBytes, data[6+usernameLen:6+usernameLen+passwordLen])
+	// Zero password in the original packet buffer
+	for i := 0; i < passwordLen; i++ {
+		data[6+usernameLen+i] = 0
+	}
 
 	s.logger.Debug("PAP authentication attempt",
 		zap.Uint16("session_id", session.ID),
@@ -638,7 +643,7 @@ func (s *Server) handlePAP(session *Session, data []byte) {
 		defer cancel()
 		authResp, err = s.radiusClient.Authenticate(ctx, &radius.AuthRequest{
 			Username: username,
-			Password: password,
+			Password: string(passwordBytes),
 			MAC:      session.ClientMAC,
 		})
 		authenticated = err == nil && authResp != nil && authResp.Accepted
@@ -646,6 +651,8 @@ func (s *Server) handlePAP(session *Session, data []byte) {
 		// Accept all if no RADIUS
 		authenticated = true
 	}
+	// Zero password now that authentication is complete
+	zeroBytes(passwordBytes)
 
 	session.Username = username
 	session.Authenticated = authenticated

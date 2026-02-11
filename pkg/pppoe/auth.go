@@ -214,12 +214,17 @@ func (a *Authenticator) handlePAPAuthRequest(identifier uint8, data []byte) erro
 	}
 	peerID := string(data[1 : 1+peerIDLen])
 
-	// Parse Password
+	// Parse Password into a byte slice so we can zero it after use
 	passwordLen := int(data[1+peerIDLen])
 	if len(data) < 2+peerIDLen+passwordLen {
 		return fmt.Errorf("PAP auth request password truncated")
 	}
-	password := string(data[2+peerIDLen : 2+peerIDLen+passwordLen])
+	passwordBytes := make([]byte, passwordLen)
+	copy(passwordBytes, data[2+peerIDLen:2+peerIDLen+passwordLen])
+	// Zero password in the original packet buffer to limit exposure
+	for i := 0; i < passwordLen; i++ {
+		data[2+peerIDLen+i] = 0
+	}
 
 	a.username = peerID
 
@@ -230,12 +235,15 @@ func (a *Authenticator) handlePAPAuthRequest(identifier uint8, data []byte) erro
 
 	// Check rate limiting
 	if a.isRateLimited() {
+		zeroBytes(passwordBytes)
 		a.sendPAPNak(identifier, "Too many failed attempts")
 		return nil
 	}
 
 	// Authenticate via RADIUS or accept all if no RADIUS configured
-	result := a.authenticate(peerID, password, nil)
+	result := a.authenticate(peerID, passwordBytes, nil)
+	// Zero the password copy now that authentication is complete
+	zeroBytes(passwordBytes)
 
 	if result.Success {
 		a.state = AuthStateSuccess
@@ -481,8 +489,10 @@ func (a *Authenticator) authenticateCHAP(username string, response []byte) *Auth
 	return result
 }
 
-// authenticate handles PAP authentication
-func (a *Authenticator) authenticate(username, password string, chapResponse []byte) *AuthResult {
+// authenticate handles PAP authentication.
+// password is a []byte to allow zeroing after use. It is converted to string
+// only for the RADIUS request and is not retained.
+func (a *Authenticator) authenticate(username string, password []byte, chapResponse []byte) *AuthResult {
 	result := &AuthResult{
 		Username:   username,
 		Method:     "PAP",
@@ -494,7 +504,7 @@ func (a *Authenticator) authenticate(username, password string, chapResponse []b
 		defer cancel()
 		authResp, err := a.radiusClient.Authenticate(ctx, &radius.AuthRequest{
 			Username: username,
-			Password: password,
+			Password: string(password),
 		})
 
 		if err != nil {
@@ -563,4 +573,12 @@ func (a *Authenticator) SendReauthChallenge() error {
 		}
 	}
 	return nil
+}
+
+// zeroBytes overwrites a byte slice with zeros to clear sensitive data
+// from memory as soon as it is no longer needed.
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
 }
