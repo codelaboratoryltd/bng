@@ -369,8 +369,7 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		if s.httpAllocator != nil && s.httpAllocatorPool != "" {
 			// First, LOOKUP existing allocation (doesn't create one)
 			allocatedIP, _, _, err := s.httpAllocator.LookupIPv4(context.Background(), macStr, s.httpAllocatorPool)
-			switch err {
-			case nil:
+			if err == nil {
 				// Subscriber has an existing allocation - they are activated
 				ip = allocatedIP
 				s.logger.Info("Found existing Nexus allocation (subscriber activated)",
@@ -385,7 +384,7 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 					zap.String("mac", macStr),
 					zap.String("pool", s.httpAllocatorPool),
 				)
-			default:
+			} else {
 				// Other error (network issue, etc) - log and fall back to local pool
 				s.logger.Warn("Nexus lookup failed, falling back to local pool",
 					zap.String("mac", macStr),
