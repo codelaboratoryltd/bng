@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -128,8 +130,8 @@ func (h *HTTPAllocator) AllocateIPv4(ctx context.Context, subscriberID, poolID s
 
 // getExistingAllocation fetches an existing allocation for a subscriber.
 func (h *HTTPAllocator) getExistingAllocation(ctx context.Context, subscriberID string, poolInfo *PoolInfo) (net.IP, net.IPMask, net.IP, error) {
-	url := h.baseURL + "/api/v1/allocations/" + subscriberID
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	reqURL := h.baseURL + "/api/v1/allocations/" + url.PathEscape(subscriberID)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create request: %w", err)
 	}
@@ -168,8 +170,8 @@ func (h *HTTPAllocator) LookupIPv4(ctx context.Context, subscriberID, poolID str
 	}
 
 	// Try to get existing allocation (GET, not POST)
-	url := h.baseURL + "/api/v1/allocations/" + subscriberID
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	reqURL := h.baseURL + "/api/v1/allocations/" + url.PathEscape(subscriberID)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create request: %w", err)
 	}
@@ -203,7 +205,7 @@ func (h *HTTPAllocator) LookupIPv4(ctx context.Context, subscriberID, poolID str
 }
 
 // ErrNoAllocation is returned when a subscriber has no allocation in Nexus.
-var ErrNoAllocation = fmt.Errorf("no allocation found")
+var ErrNoAllocation = errors.New("no allocation found")
 
 // AllocateIPv6 allocates an IPv6 address/prefix from the specified pool via Nexus API.
 // Returns the allocated IP, the prefix (as IPNet), and any error.
@@ -276,8 +278,8 @@ func (h *HTTPAllocator) AllocateIPv6(ctx context.Context, subscriberID, poolID s
 
 // getExistingIPv6Allocation fetches an existing IPv6 allocation for a subscriber.
 func (h *HTTPAllocator) getExistingIPv6Allocation(ctx context.Context, subscriberID string, poolInfo *PoolInfo) (net.IP, *net.IPNet, error) {
-	url := h.baseURL + "/api/v1/allocations/" + subscriberID
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	reqURL := h.baseURL + "/api/v1/allocations/" + url.PathEscape(subscriberID)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
@@ -319,8 +321,8 @@ func (h *HTTPAllocator) getExistingIPv6Allocation(ctx context.Context, subscribe
 
 // ReleaseIPv4 releases an IPv4 address allocation.
 func (h *HTTPAllocator) ReleaseIPv4(ctx context.Context, subscriberID string) error {
-	url := h.baseURL + "/api/v1/allocations/" + subscriberID
-	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	reqURL := h.baseURL + "/api/v1/allocations/" + url.PathEscape(subscriberID)
+	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -340,8 +342,8 @@ func (h *HTTPAllocator) ReleaseIPv4(ctx context.Context, subscriberID string) er
 
 // ReleaseIPv6 releases an IPv6 address allocation by subscriber ID.
 func (h *HTTPAllocator) ReleaseIPv6(ctx context.Context, subscriberID string) error {
-	url := h.baseURL + "/api/v1/allocations/" + subscriberID
-	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	reqURL := h.baseURL + "/api/v1/allocations/" + url.PathEscape(subscriberID)
+	httpReq, err := http.NewRequestWithContext(ctx, "DELETE", reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -459,8 +461,8 @@ func (h *HTTPAllocator) CreatePool(ctx context.Context, id, cidr string, prefix 
 
 // GetAllocation fetches an existing allocation for a subscriber.
 func (h *HTTPAllocator) GetAllocation(ctx context.Context, subscriberID string) (*AllocationResponse, error) {
-	url := h.baseURL + "/api/v1/allocations/" + subscriberID
-	httpReq, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	reqURL := h.baseURL + "/api/v1/allocations/" + url.PathEscape(subscriberID)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

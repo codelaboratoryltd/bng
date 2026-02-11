@@ -2,6 +2,7 @@ package nexus_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func TestMemoryStore_BasicOperations(t *testing.T) {
 	// Test Get non-existent key
 	t.Run("get non-existent", func(t *testing.T) {
 		_, err := store.Get(ctx, "/test/nonexistent")
-		if err != nexus.ErrNotFound {
+		if !errors.Is(err, nexus.ErrNotFound) {
 			t.Errorf("Expected ErrNotFound, got %v", err)
 		}
 	})
@@ -49,7 +50,7 @@ func TestMemoryStore_BasicOperations(t *testing.T) {
 		}
 
 		_, err = store.Get(ctx, "/test/todelete")
-		if err != nexus.ErrNotFound {
+		if !errors.Is(err, nexus.ErrNotFound) {
 			t.Errorf("Expected ErrNotFound after delete, got %v", err)
 		}
 	})
@@ -241,7 +242,7 @@ func TestTypedStore(t *testing.T) {
 		}
 
 		_, err = subscribers.Get(ctx, "sub-002")
-		if err != nexus.ErrNotFound {
+		if !errors.Is(err, nexus.ErrNotFound) {
 			t.Errorf("Expected ErrNotFound, got %v", err)
 		}
 	})
