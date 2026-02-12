@@ -11,8 +11,8 @@ RUN apt-get update && apt-get install -y \
     llvm-14 \
     libbpf-dev \
     linux-headers-generic \
-    gcc-multilib \
     make \
+    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then apt-get install -y gcc-multilib; fi \
     && rm -rf /var/lib/apt/lists/*
 
 RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
