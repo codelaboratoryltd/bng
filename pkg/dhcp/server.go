@@ -295,7 +295,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 // handleDHCP handles incoming DHCP packets (slow path)
 func (s *Server) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCPv4) {
-	s.requestsTotal++
+	atomic.AddUint64(&s.requestsTotal, 1)
 
 	mac := req.ClientHWAddr.String()
 	msgType := req.MessageType()
@@ -508,7 +508,7 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 		return nil, fmt.Errorf("failed to build OFFER: %w", err)
 	}
 
-	s.offersTotal++
+	atomic.AddUint64(&s.offersTotal, 1)
 	return resp, nil
 }
 
@@ -1090,11 +1090,11 @@ func (s *Server) cleanupExpiredLeases() {
 // Stats returns DHCP server statistics
 func (s *Server) Stats() map[string]uint64 {
 	return map[string]uint64{
-		"requests_total": s.requestsTotal,
-		"offers_total":   s.offersTotal,
-		"acks_total":     s.acksTotal,
-		"naks_total":     s.naksTotal,
-		"releases_total": s.releasesTotal,
+		"requests_total": atomic.LoadUint64(&s.requestsTotal),
+		"offers_total":   atomic.LoadUint64(&s.offersTotal),
+		"acks_total":     atomic.LoadUint64(&s.acksTotal),
+		"naks_total":     atomic.LoadUint64(&s.naksTotal),
+		"releases_total": atomic.LoadUint64(&s.releasesTotal),
 	}
 }
 
