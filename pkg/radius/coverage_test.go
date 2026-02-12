@@ -1730,9 +1730,9 @@ func TestCoAServer_HandleCoARequest_WithHandler(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	handlerCalled := false
+	var handlerCalled atomic.Bool
 	srv.SetCoAHandler(func(ctx context.Context, req *CoARequest) *CoAResponse {
-		handlerCalled = true
+		handlerCalled.Store(true)
 		return &CoAResponse{Success: true, Message: "accepted"}
 	})
 
@@ -1741,7 +1741,7 @@ func TestCoAServer_HandleCoARequest_WithHandler(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond) // Allow time to process
 
-	if !handlerCalled {
+	if !handlerCalled.Load() {
 		t.Error("CoA handler was not called")
 	}
 
@@ -1795,9 +1795,9 @@ func TestCoAServer_HandleDisconnectRequest_WithHandler(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	handlerCalled := false
+	var handlerCalled atomic.Bool
 	srv.SetDisconnectHandler(func(ctx context.Context, req *DisconnectRequest) *DisconnectResponse {
-		handlerCalled = true
+		handlerCalled.Store(true)
 		return &DisconnectResponse{Success: true, Message: "disconnected"}
 	})
 
@@ -1805,7 +1805,7 @@ func TestCoAServer_HandleDisconnectRequest_WithHandler(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if !handlerCalled {
+	if !handlerCalled.Load() {
 		t.Error("Disconnect handler was not called")
 	}
 
