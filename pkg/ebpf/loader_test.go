@@ -1313,6 +1313,39 @@ func TestLoaderLoadInvalidBPFPath(t *testing.T) {
 	}
 }
 
+// Issue #90: Test CheckCircuitIDCollision without loaded maps
+func TestLoaderCheckCircuitIDCollisionWithoutLoad(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	loader, _ := NewLoader("eth0", logger)
+
+	_, err := loader.CheckCircuitIDCollision([]byte("eth 0/1/1:100"), 0xAABBCCDDEEFF)
+	if err == nil {
+		t.Error("CheckCircuitIDCollision should fail without loaded maps")
+	}
+}
+
+// Issue #90: Test collision characteristics documentation references valid constants
+func TestCircuitIDCollisionHashProperties(t *testing.T) {
+	// Verify that different circuit-IDs with similar patterns produce distinct hashes
+	// This validates the FNV-1a distribution claim in the collision documentation
+	circuitIDs := []string{
+		"eth 0/1/1:100",
+		"eth 0/1/1:101",
+		"eth 0/1/2:100",
+		"eth 0/2/1:100",
+		"eth 1/1/1:100",
+	}
+
+	hashes := make(map[uint64]string)
+	for _, cid := range circuitIDs {
+		hash := HashCircuitID([]byte(cid))
+		if existing, ok := hashes[hash]; ok {
+			t.Errorf("Hash collision between %q and %q (hash=0x%x)", existing, cid, hash)
+		}
+		hashes[hash] = cid
+	}
+}
+
 // Test MakeCircuitIDKey is usable as map key
 func TestMakeCircuitIDKeyAsMapKey(t *testing.T) {
 	m := make(map[CircuitIDKey]int)

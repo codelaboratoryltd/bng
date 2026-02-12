@@ -57,6 +57,14 @@ type Server struct {
 	// Enable RADIUS auth (if false, all MACs are accepted)
 	radiusAuthEnabled bool
 
+	// Circuit-ID collision callback (Issue #90)
+	// Called when a hash collision is detected during circuit-ID map insertion.
+	onCircuitIDCollision func()
+
+	// Circuit-ID insertion counters for collision rate calculation (Issue #90)
+	circuitIDInsertions uint64
+	circuitIDCollisions uint64
+
 	// Metrics
 	requestsTotal  uint64
 	offersTotal    uint64
@@ -162,6 +170,18 @@ func (s *Server) SetHTTPAllocator(allocator *nexus.HTTPAllocator, poolID string)
 // allocation via hashring-based peer-to-peer communication.
 func (s *Server) SetPeerPool(pp *pool.PeerPool) {
 	s.peerPool = pp
+}
+
+// SetCircuitIDCollisionCallback sets a callback invoked when a circuit-ID
+// hash collision is detected during eBPF map insertion (Issue #90).
+func (s *Server) SetCircuitIDCollisionCallback(fn func()) {
+	s.onCircuitIDCollision = fn
+}
+
+// CircuitIDCollisionStats returns the total circuit-ID map insertions and
+// collisions detected, for computing collision rate (Issue #90).
+func (s *Server) CircuitIDCollisionStats() (insertions, collisions uint64) {
+	return atomic.LoadUint64(&s.circuitIDInsertions), atomic.LoadUint64(&s.circuitIDCollisions)
 }
 
 // generateSessionID generates a unique RADIUS session ID
@@ -638,6 +658,21 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	// Issue #15: Add circuit-id to MAC mapping for fast path lookup (legacy hash-based)
 	if len(lease.CircuitID) > 0 && s.loader != nil {
 		macU64 := ebpf.MACToUint64(mac)
+
+		// Issue #90: Check for hash collision before inserting
+		atomic.AddUint64(&s.circuitIDInsertions, 1)
+		if collision, err := s.loader.CheckCircuitIDCollision(lease.CircuitID, macU64); err == nil && collision {
+			atomic.AddUint64(&s.circuitIDCollisions, 1)
+			s.logger.Warn("Circuit-ID hash collision detected (Issue #90)",
+				zap.String("mac", mac.String()),
+				zap.String("circuit_id", string(lease.CircuitID)),
+				zap.Uint64("hash", ebpf.HashCircuitID(lease.CircuitID)),
+			)
+			if s.onCircuitIDCollision != nil {
+				s.onCircuitIDCollision()
+			}
+		}
+
 		if err := s.loader.AddCircuitIDMapping(lease.CircuitID, macU64); err != nil {
 			s.logger.Warn("Failed to add circuit-id to MAC mapping to eBPF",
 				zap.String("mac", mac.String()),

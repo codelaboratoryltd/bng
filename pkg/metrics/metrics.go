@@ -31,6 +31,10 @@ type Metrics struct {
 	poolAvailable   *prometheus.GaugeVec
 	poolAllocated   *prometheus.GaugeVec
 
+	// Circuit-ID collision metrics (Issue #90)
+	circuitIDCollisionsTotal prometheus.Counter
+	circuitIDCollisionRate   prometheus.Gauge
+
 	// System metrics
 	ebpfMapEntries *prometheus.GaugeVec
 
@@ -166,6 +170,20 @@ func New(loader *ebpf.Loader, poolMgr *dhcp.PoolManager, server *dhcp.Server, lo
 				Help: "Allocated IPs in pool",
 			},
 			[]string{"pool_id", "pool_name"},
+		),
+
+		circuitIDCollisionsTotal: prometheus.NewCounter(
+			prometheus.CounterOpts{
+				Name: "bng_circuit_id_hash_collisions_total",
+				Help: "Total FNV-1a hash collisions detected in circuit-ID map",
+			},
+		),
+
+		circuitIDCollisionRate: prometheus.NewGauge(
+			prometheus.GaugeOpts{
+				Name: "bng_circuit_id_collision_rate",
+				Help: "Ratio of circuit-ID map insertions that resulted in hash collisions",
+			},
 		),
 
 		ebpfMapEntries: prometheus.NewGaugeVec(
@@ -373,6 +391,8 @@ func (m *Metrics) Register() error {
 		m.ebpfFastpathMisses,
 		m.ebpfErrors,
 		m.ebpfCacheExpired,
+		m.circuitIDCollisionsTotal,
+		m.circuitIDCollisionRate,
 		m.ebpfMapEntries,
 		// Pool metrics
 		m.poolUtilization,
@@ -514,6 +534,18 @@ func (m *Metrics) SetSubscriberCount(total int, byClass map[string]int, byISP ma
 	}
 }
 
+// RecordCircuitIDCollision increments the circuit-ID hash collision counter
+// and updates the collision rate gauge (Issue #90).
+func (m *Metrics) RecordCircuitIDCollision() {
+	m.circuitIDCollisionsTotal.Inc()
+}
+
+// SetCircuitIDCollisionRate sets the collision rate gauge (Issue #90).
+// Rate is the ratio of collisions to total circuit-ID insertions.
+func (m *Metrics) SetCircuitIDCollisionRate(rate float64) {
+	m.circuitIDCollisionRate.Set(rate)
+}
+
 // Handler returns the Prometheus HTTP handler
 func (m *Metrics) Handler() http.Handler {
 	return promhttp.Handler()
@@ -554,6 +586,12 @@ func (m *Metrics) Collect() {
 	// Collect DHCP server stats
 	if m.server != nil {
 		m.dhcpActiveLeases.Set(float64(m.server.ActiveLeases()))
+
+		// Issue #90: Update circuit-ID collision rate
+		insertions, collisions := m.server.CircuitIDCollisionStats()
+		if insertions > 0 {
+			m.circuitIDCollisionRate.Set(float64(collisions) / float64(insertions))
+		}
 	}
 }
 

@@ -521,6 +521,26 @@ const (
 	fnv1aPrime uint64 = 0x100000001b3
 )
 
+// Circuit-ID Hash Collision Characteristics (Issue #90)
+//
+// The circuit_id_map uses FNV-1a (64-bit) to hash variable-length circuit-ID
+// strings into fixed uint64 keys for eBPF map lookup. Collision properties:
+//
+//   - FNV-1a 64-bit has a theoretical collision probability of ~1/(2^64) per pair.
+//   - By the birthday paradox, at N entries the expected collision probability is
+//     approximately N^2 / (2 * 2^64). For 100k subscribers this is ~2.7e-10
+//     (negligible). At 1M subscribers it rises to ~2.7e-8 (still very low).
+//   - Real-world circuit-IDs from OLTs have structured formats (e.g.
+//     "eth 0/1/1:100.200") which distributes well with FNV-1a.
+//   - A collision means two different circuit-IDs hash to the same uint64 key,
+//     causing the second subscriber's MAC to overwrite the first in the eBPF map.
+//     The affected subscriber falls back to slow-path DHCP (no data loss, only
+//     a latency increase from ~10us to ~10ms).
+//
+// The collision counter below is incremented when the slow path detects that
+// an existing circuit_id_map entry maps to a different MAC than the one being
+// inserted, indicating a hash collision between two distinct circuit-IDs.
+
 // HashCircuitID computes FNV-1a hash of a circuit-id string
 // This must match the hash function in the eBPF program
 func HashCircuitID(circuitID []byte) uint64 {
@@ -565,6 +585,26 @@ func (l *Loader) GetCircuitIDMapping(circuitID []byte) (uint64, error) {
 		return 0, err
 	}
 	return mac, nil
+}
+
+// CheckCircuitIDCollision checks whether inserting a circuit-ID mapping would
+// collide with an existing entry that maps to a different MAC address (Issue #90).
+// Returns true if a collision is detected (existing entry maps to a different MAC).
+// Returns false if the key is unused or already maps to the same MAC.
+func (l *Loader) CheckCircuitIDCollision(circuitID []byte, newMAC uint64) (bool, error) {
+	if l.circuitIDMap == nil {
+		return false, fmt.Errorf("circuit_id_map not loaded")
+	}
+
+	hash := HashCircuitID(circuitID)
+	var existingMAC uint64
+	if err := l.circuitIDMap.Lookup(&hash, &existingMAC); err != nil {
+		// Key not found — no collision
+		return false, nil
+	}
+
+	// Collision: same hash, different MAC
+	return existingMAC != newMAC, nil
 }
 
 // === Circuit-ID Subscriber Map Operations (Issue #56) ===
