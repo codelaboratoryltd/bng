@@ -48,9 +48,9 @@
 #define OPT82_CIRCUIT_ID   1
 #define OPT82_REMOTE_ID    2
 
-/* Maximum lengths for Option 82 sub-options */
-#define MAX_CIRCUIT_ID_LEN 63
-#define MAX_REMOTE_ID_LEN  63
+/* Maximum lengths for Option 82 sub-options (must match buffer sizes below) */
+#define MAX_CIRCUIT_ID_LEN 64
+#define MAX_REMOTE_ID_LEN  64
 
 /* Parsed DHCP options structure - holds extracted option values */
 struct dhcp_parsed_options {
@@ -58,8 +58,8 @@ struct dhcp_parsed_options {
 	__u8  has_option82;          /* Flag: Option 82 present */
 	__u8  circuit_id_len;        /* Length of circuit-id */
 	__u8  remote_id_len;         /* Length of remote-id */
-	__u8  circuit_id[MAX_CIRCUIT_ID_LEN + 1];  /* Circuit-ID value (Option 82.1) */
-	__u8  remote_id[MAX_REMOTE_ID_LEN + 1];    /* Remote-ID value (Option 82.2) */
+	__u8  circuit_id[MAX_CIRCUIT_ID_LEN];  /* Circuit-ID value (Option 82.1) */
+	__u8  remote_id[MAX_REMOTE_ID_LEN];    /* Remote-ID value (Option 82.2) */
 	__u32 requested_ip;          /* Requested IP address (Option 50) */
 	__u8  client_id_len;         /* Length of client identifier */
 	__u8  client_id[64];         /* Client identifier (Option 61) */
