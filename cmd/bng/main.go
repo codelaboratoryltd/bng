@@ -21,6 +21,7 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/pool"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
+	"github.com/codelaboratoryltd/bng/pkg/routing"
 	"github.com/codelaboratoryltd/bng/pkg/slaac"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -666,6 +667,65 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		)
 	}
 
+	// Initialize BGP controller if enabled (Issue #48)
+	var bgpController *routing.BGPController
+	var bfdManager *routing.BFDManager
+	if bgpEnabled {
+		if bgpLocalAS == 0 {
+			return fmt.Errorf("--bgp-local-as is required when --bgp-enabled is set")
+		}
+
+		// Determine router ID
+		routerID := net.ParseIP(bgpRouterID)
+		if routerID == nil {
+			routerID = srvIP // Default to server IP
+		}
+
+		bgpCfg := routing.DefaultBGPConfig()
+		bgpCfg.LocalAS = bgpLocalAS
+		bgpCfg.RouterID = routerID
+
+		bgpController = routing.NewBGPController(bgpCfg, logger)
+		if err := bgpController.Start(); err != nil {
+			return fmt.Errorf("failed to start BGP controller: %w", err)
+		}
+
+		// Add neighbors from flag
+		if bgpNeighbors != "" {
+			for _, entry := range splitAndTrim(bgpNeighbors) {
+				ip, as, err := parseBGPNeighborEntry(entry)
+				if err != nil {
+					return fmt.Errorf("invalid --bgp-neighbors entry %q: %w", entry, err)
+				}
+				neighbor := &routing.BGPNeighbor{
+					Address:    ip,
+					RemoteAS:   as,
+					BFDEnabled: bgpBFDEnabled,
+				}
+				if err := bgpController.AddNeighbor(neighbor); err != nil {
+					return fmt.Errorf("failed to add BGP neighbor %s: %w", ip, err)
+				}
+			}
+		}
+
+		logger.Info("BGP controller started",
+			zap.Uint32("local_as", bgpLocalAS),
+			zap.String("router_id", routerID.String()),
+			zap.String("neighbors", bgpNeighbors),
+		)
+
+		// Initialize BFD manager if enabled
+		if bgpBFDEnabled {
+			bfdCfg := routing.DefaultBFDConfig()
+			bfdManager = routing.NewBFDManager(bfdCfg, logger)
+			if err := bfdManager.Start(); err != nil {
+				logger.Warn("Failed to start BFD manager", zap.Error(err))
+			} else {
+				logger.Info("BFD manager started for BGP fast failover")
+			}
+		}
+	}
+
 	// Resolve RADIUS secret from file or direct flag
 	resolvedRadiusSecret := resolveSecret(radiusSecret, radiusSecretFile, "radius-secret", "radius-secret-file", logger)
 
@@ -922,6 +982,7 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		zap.String("metrics", metricsAddr),
 		zap.Bool("dhcpv6_enabled", dhcpv6Server != nil),
 		zap.Bool("slaac_enabled", raServer != nil),
+		zap.Bool("bgp_enabled", bgpController != nil),
 	)
 	logger.Info("Press Ctrl+C to stop")
 
@@ -963,6 +1024,17 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if haSyncer != nil {
 		if err := haSyncer.Stop(); err != nil {
 			logger.Warn("Failed to stop HA syncer", zap.Error(err))
+		}
+	}
+	// Stop BGP controller and BFD manager (Issue #48)
+	if bfdManager != nil {
+		if err := bfdManager.Stop(); err != nil {
+			logger.Warn("Failed to stop BFD manager", zap.Error(err))
+		}
+	}
+	if bgpController != nil {
+		if err := bgpController.Stop(); err != nil {
+			logger.Warn("Failed to stop BGP controller", zap.Error(err))
 		}
 	}
 	logger.Info("BNG stopped")
@@ -1140,4 +1212,38 @@ func resolveSecret(direct, filePath, directFlag, fileFlag string, logger *zap.Lo
 		)
 	}
 	return direct
+}
+
+// parseBGPNeighborEntry parses a "ip:as" string into IP and AS number.
+// Format: "10.0.0.1:65001"
+func parseBGPNeighborEntry(entry string) (net.IP, uint32, error) {
+	colonIdx := -1
+	for i := len(entry) - 1; i >= 0; i-- {
+		if entry[i] == ':' {
+			colonIdx = i
+			break
+		}
+	}
+	if colonIdx < 0 {
+		return nil, 0, fmt.Errorf("expected format ip:as (e.g., 10.0.0.1:65001)")
+	}
+
+	ip := net.ParseIP(entry[:colonIdx])
+	if ip == nil {
+		return nil, 0, fmt.Errorf("invalid IP address: %s", entry[:colonIdx])
+	}
+
+	asStr := entry[colonIdx+1:]
+	var asNum uint32
+	for _, c := range asStr {
+		if c < '0' || c > '9' {
+			return nil, 0, fmt.Errorf("invalid AS number: %s", asStr)
+		}
+		asNum = asNum*10 + uint32(c-'0')
+	}
+	if asNum == 0 {
+		return nil, 0, fmt.Errorf("AS number must be non-zero")
+	}
+
+	return ip, asNum, nil
 }
