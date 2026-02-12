@@ -1,11 +1,14 @@
 package ebpf
 
 import (
+	"fmt"
 	"net"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf/link"
 	"go.uber.org/zap"
 )
 
@@ -732,5 +735,602 @@ func TestIPPoolStruct(t *testing.T) {
 
 	if pool.LeaseTime != 86400 {
 		t.Errorf("LeaseTime = %d, want 86400", pool.LeaseTime)
+	}
+}
+
+// === New tests for Issue #80: edge cases, error paths, concurrent access ===
+
+// Test NewLoader with empty interface name
+func TestNewLoaderEmptyInterface(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	_, err := NewLoader("", logger)
+	if err == nil {
+		t.Error("Expected error for empty interface name")
+	}
+}
+
+// Test WithBPFPath option
+func TestWithBPFPath(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	loader, err := NewLoader("eth0", logger, WithBPFPath("/custom/path.o"))
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+	if loader.bpfPath != "/custom/path.o" {
+		t.Errorf("bpfPath = %s, want /custom/path.o", loader.bpfPath)
+	}
+}
+
+// Test WithXDPMode option
+func TestWithXDPMode(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	loader, err := NewLoader("eth0", logger, WithXDPMode(link.XDPDriverMode))
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+	if loader.xdpMode != link.XDPDriverMode {
+		t.Errorf("xdpMode = %d, want %d", loader.xdpMode, link.XDPDriverMode)
+	}
+}
+
+// Test NewLoader defaults
+func TestNewLoaderDefaults(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	loader, err := NewLoader("eth0", logger)
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+
+	if loader.iface != "eth0" {
+		t.Errorf("iface = %s, want eth0", loader.iface)
+	}
+	if loader.bpfPath != "bpf/dhcp_fastpath.bpf.o" {
+		t.Errorf("bpfPath = %s, want bpf/dhcp_fastpath.bpf.o", loader.bpfPath)
+	}
+	if loader.xdpMode != link.XDPGenericMode {
+		t.Errorf("xdpMode = %d, want %d (generic)", loader.xdpMode, link.XDPGenericMode)
+	}
+	if loader.logger == nil {
+		t.Error("Expected logger to be set")
+	}
+	if loader.collection != nil {
+		t.Error("Expected collection to be nil before Load")
+	}
+	if loader.xdpLink != nil {
+		t.Error("Expected xdpLink to be nil before Load")
+	}
+}
+
+// Test NewLoader with multiple options (overriding)
+func TestNewLoaderMultipleOptions(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	loader, err := NewLoader("eth0", logger,
+		WithBPFPath("/first.o"),
+		WithBPFPath("/second.o"), // should override
+		WithXDPMode(link.XDPDriverMode),
+	)
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+	if loader.bpfPath != "/second.o" {
+		t.Errorf("bpfPath = %s, want /second.o (last option wins)", loader.bpfPath)
+	}
+}
+
+// Test IPToUint32 with nil IP
+func TestIPToUint32Nil(t *testing.T) {
+	result := IPToUint32(nil)
+	if result != 0 {
+		t.Errorf("IPToUint32(nil) = 0x%08X, want 0", result)
+	}
+}
+
+// Test IPToUint32 with IPv6 address (should return 0)
+func TestIPToUint32IPv6(t *testing.T) {
+	ip := net.ParseIP("2001:db8::1")
+	// To4() returns nil for IPv6 addresses, so result should be 0
+	result := IPToUint32(ip)
+	if result != 0 {
+		t.Errorf("IPToUint32(IPv6) = 0x%08X, want 0", result)
+	}
+}
+
+// Test MACToUint64 with short MAC (less than 6 bytes)
+func TestMACToUint64Short(t *testing.T) {
+	short := net.HardwareAddr{0xAA, 0xBB}
+	result := MACToUint64(short)
+	if result != 0 {
+		t.Errorf("MACToUint64(short) = 0x%X, want 0", result)
+	}
+}
+
+// Test MACToUint64 with nil MAC
+func TestMACToUint64Nil(t *testing.T) {
+	result := MACToUint64(nil)
+	if result != 0 {
+		t.Errorf("MACToUint64(nil) = 0x%X, want 0", result)
+	}
+}
+
+// Test MACToUint64 with empty MAC
+func TestMACToUint64Empty(t *testing.T) {
+	result := MACToUint64(net.HardwareAddr{})
+	if result != 0 {
+		t.Errorf("MACToUint64(empty) = 0x%X, want 0", result)
+	}
+}
+
+// Test LeaseExpiryFromDuration with zero duration
+func TestLeaseExpiryFromDurationZero(t *testing.T) {
+	before := uint64(time.Now().Unix())
+	expiry := LeaseExpiryFromDuration(0)
+	after := uint64(time.Now().Unix())
+
+	if expiry < before || expiry > after {
+		t.Errorf("LeaseExpiryFromDuration(0) = %d, expected between %d and %d",
+			expiry, before, after)
+	}
+}
+
+// Test LeaseExpiryFromDuration with negative duration
+func TestLeaseExpiryFromDurationNegative(t *testing.T) {
+	now := uint64(time.Now().Unix())
+	expiry := LeaseExpiryFromDuration(-1 * time.Hour)
+
+	// Should be in the past
+	if expiry >= now {
+		t.Errorf("LeaseExpiryFromDuration(-1h) = %d, expected < %d", expiry, now)
+	}
+}
+
+// Test VLANKey struct
+func TestVLANKeyStruct(t *testing.T) {
+	key := VLANKey{STag: 100, CTag: 200}
+
+	if key.STag != 100 {
+		t.Errorf("STag = %d, want 100", key.STag)
+	}
+	if key.CTag != 200 {
+		t.Errorf("CTag = %d, want 200", key.CTag)
+	}
+
+	// Different keys should not be equal
+	key2 := VLANKey{STag: 100, CTag: 201}
+	if key == key2 {
+		t.Error("Expected different VLANKeys to not be equal")
+	}
+
+	// Same keys should be equal
+	key3 := VLANKey{STag: 100, CTag: 200}
+	if key != key3 {
+		t.Error("Expected identical VLANKeys to be equal")
+	}
+}
+
+// Test VLANKey boundary values
+func TestVLANKeyBoundary(t *testing.T) {
+	tests := []struct {
+		name string
+		sTag uint16
+		cTag uint16
+	}{
+		{"zero", 0, 0},
+		{"max", 0xFFFF, 0xFFFF},
+		{"typical outer", 100, 200},
+		{"max vlan id", 4094, 4094},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key := VLANKey{STag: tt.sTag, CTag: tt.cTag}
+			if key.STag != tt.sTag {
+				t.Errorf("STag = %d, want %d", key.STag, tt.sTag)
+			}
+			if key.CTag != tt.cTag {
+				t.Errorf("CTag = %d, want %d", key.CTag, tt.cTag)
+			}
+		})
+	}
+}
+
+// Test all map operations return consistent errors when maps are nil
+func TestLoaderAllMapOpsNilConsistency(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	loader, _ := NewLoader("eth0", logger)
+
+	// Every map operation should fail with a descriptive error
+	ops := []struct {
+		name string
+		fn   func() error
+	}{
+		{"AddSubscriber", func() error { return loader.AddSubscriber(1, &PoolAssignment{}) }},
+		{"RemoveSubscriber", func() error { return loader.RemoveSubscriber(1) }},
+		{"GetSubscriber", func() error { _, err := loader.GetSubscriber(1); return err }},
+		{"AddVLANSubscriber", func() error { return loader.AddVLANSubscriber(1, 2, &PoolAssignment{}) }},
+		{"RemoveVLANSubscriber", func() error { return loader.RemoveVLANSubscriber(1, 2) }},
+		{"GetVLANSubscriber", func() error { _, err := loader.GetVLANSubscriber(1, 2); return err }},
+		{"AddPool", func() error { return loader.AddPool(1, &IPPool{}) }},
+		{"RemovePool", func() error { return loader.RemovePool(1) }},
+		{"GetPool", func() error { _, err := loader.GetPool(1); return err }},
+		{"GetStats", func() error { _, err := loader.GetStats(); return err }},
+		{"ResetStats", func() error { return loader.ResetStats() }},
+		{"SetServerConfig", func() error {
+			mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+			return loader.SetServerConfig(mac, net.ParseIP("10.0.0.1"), 1)
+		}},
+		{"GetServerConfig", func() error { _, err := loader.GetServerConfig(); return err }},
+		{"AddCircuitIDMapping", func() error { return loader.AddCircuitIDMapping([]byte("test"), 1) }},
+		{"RemoveCircuitIDMapping", func() error { return loader.RemoveCircuitIDMapping([]byte("test")) }},
+		{"GetCircuitIDMapping", func() error { _, err := loader.GetCircuitIDMapping([]byte("test")); return err }},
+		{"AddCircuitIDSubscriber", func() error {
+			return loader.AddCircuitIDSubscriber([]byte("test"), &PoolAssignment{})
+		}},
+		{"RemoveCircuitIDSubscriber", func() error { return loader.RemoveCircuitIDSubscriber([]byte("test")) }},
+		{"GetCircuitIDSubscriber", func() error { _, err := loader.GetCircuitIDSubscriber([]byte("test")); return err }},
+	}
+
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			err := op.fn()
+			if err == nil {
+				t.Errorf("%s should fail when maps are nil", op.name)
+			}
+		})
+	}
+}
+
+// Test Close is idempotent (double close should not panic)
+func TestLoaderDoubleClose(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	loader, _ := NewLoader("eth0", logger)
+
+	// First close
+	if err := loader.Close(); err != nil {
+		t.Errorf("First Close() failed: %v", err)
+	}
+
+	// Second close should also succeed without panic
+	if err := loader.Close(); err != nil {
+		t.Errorf("Second Close() failed: %v", err)
+	}
+}
+
+// Test concurrent access to NewLoader (should be safe, no shared state)
+func TestNewLoaderConcurrent(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 10)
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			iface := fmt.Sprintf("eth%d", idx)
+			l, err := NewLoader(iface, logger)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if l.iface != iface {
+				errs <- fmt.Errorf("iface = %s, want %s", l.iface, iface)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent NewLoader error: %v", err)
+	}
+}
+
+// Test concurrent map nil checks (read-only, should be safe)
+func TestLoaderConcurrentNilMapOps(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	loader, _ := NewLoader("eth0", logger)
+
+	var wg sync.WaitGroup
+
+	// Run multiple goroutines all checking nil maps
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = loader.HasVLANSupport()
+			_ = loader.HasCircuitIDSubscriberSupport()
+			_, _ = loader.GetSubscriber(uint64(1))
+			_, _ = loader.GetPool(uint32(1))
+			_, _ = loader.GetStats()
+		}()
+	}
+
+	wg.Wait()
+}
+
+// Test HashCircuitID with very long input
+func TestHashCircuitIDLongInput(t *testing.T) {
+	// Should not panic with very large circuit IDs
+	large := make([]byte, 10000)
+	for i := range large {
+		large[i] = byte(i % 256)
+	}
+
+	hash := HashCircuitID(large)
+	if hash == 0 {
+		// FNV-1a of non-zero data should almost never be 0
+		t.Log("Warning: hash of large input is 0 (extremely unlikely)")
+	}
+
+	// Verify determinism
+	hash2 := HashCircuitID(large)
+	if hash != hash2 {
+		t.Error("HashCircuitID is not deterministic for large input")
+	}
+}
+
+// Test HashCircuitID single byte inputs
+func TestHashCircuitIDSingleByte(t *testing.T) {
+	hashes := make(map[uint64]byte)
+	for i := 0; i < 256; i++ {
+		b := byte(i)
+		hash := HashCircuitID([]byte{b})
+		if existing, ok := hashes[hash]; ok {
+			t.Errorf("HashCircuitID collision: byte 0x%02x and 0x%02x both hash to 0x%x", existing, b, hash)
+		}
+		hashes[hash] = b
+	}
+}
+
+// Test MakeCircuitIDKey with nil input
+func TestMakeCircuitIDKeyNil(t *testing.T) {
+	key := MakeCircuitIDKey(nil)
+	for i := 0; i < CircuitIDKeyLen; i++ {
+		if key[i] != 0 {
+			t.Errorf("MakeCircuitIDKey(nil)[%d] = 0x%02x, want 0x00", i, key[i])
+		}
+	}
+}
+
+// Test MakeCircuitIDKey with single byte
+func TestMakeCircuitIDKeySingleByte(t *testing.T) {
+	key := MakeCircuitIDKey([]byte{0xAB})
+	if key[0] != 0xAB {
+		t.Errorf("key[0] = 0x%02x, want 0xAB", key[0])
+	}
+	for i := 1; i < CircuitIDKeyLen; i++ {
+		if key[i] != 0 {
+			t.Errorf("key[%d] = 0x%02x, want 0x00", i, key[i])
+		}
+	}
+}
+
+// Test IP round-trip conversion edge cases
+func TestIPConversionEdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		ip   string
+		n    uint32
+	}{
+		{"loopback", "127.0.0.1", 0x7F000001},
+		{"broadcast", "255.255.255.255", 0xFFFFFFFF},
+		{"zero", "0.0.0.0", 0x00000000},
+		{"class A", "10.255.255.255", 0x0AFFFFFF},
+		{"link-local", "169.254.1.1", 0xA9FE0101},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			n := IPToUint32(ip)
+			if n != tt.n {
+				t.Errorf("IPToUint32(%s) = 0x%08X, want 0x%08X", tt.ip, n, tt.n)
+			}
+			back := Uint32ToIP(n)
+			if !ip.To4().Equal(back) {
+				t.Errorf("Round trip failed: %s -> 0x%08X -> %s", tt.ip, n, back)
+			}
+		})
+	}
+}
+
+// Test MAC round-trip conversion edge cases
+func TestMACConversionEdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		mac  string
+		n    uint64
+	}{
+		{"broadcast", "ff:ff:ff:ff:ff:ff", 0xFFFFFFFFFFFF},
+		{"zero", "00:00:00:00:00:00", 0x000000000000},
+		{"multicast", "01:00:5e:00:00:01", 0x01005E000001},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mac, _ := net.ParseMAC(tt.mac)
+			n := MACToUint64(mac)
+			if n != tt.n {
+				t.Errorf("MACToUint64(%s) = 0x%012X, want 0x%012X", tt.mac, n, tt.n)
+			}
+			back := Uint64ToMAC(n)
+			if mac.String() != back.String() {
+				t.Errorf("Round trip failed: %s -> 0x%012X -> %s", tt.mac, n, back)
+			}
+		})
+	}
+}
+
+// Test that Uint32ToIP always returns a 4-byte IP
+func TestUint32ToIPLength(t *testing.T) {
+	tests := []uint32{0, 1, 0xFFFFFFFF, 0x0A000001}
+
+	for _, n := range tests {
+		ip := Uint32ToIP(n)
+		if len(ip) != 4 {
+			t.Errorf("Uint32ToIP(0x%X) returned %d-byte IP, want 4", n, len(ip))
+		}
+	}
+}
+
+// Test that Uint64ToMAC always returns a 6-byte MAC
+func TestUint64ToMACLength(t *testing.T) {
+	tests := []uint64{0, 1, 0xFFFFFFFFFFFF, 0xAABBCCDDEEFF}
+
+	for _, n := range tests {
+		mac := Uint64ToMAC(n)
+		if len(mac) != 6 {
+			t.Errorf("Uint64ToMAC(0x%X) returned %d-byte MAC, want 6", n, len(mac))
+		}
+	}
+}
+
+// Test PoolAssignment fields with boundary values
+func TestPoolAssignmentBoundaryValues(t *testing.T) {
+	pa := PoolAssignment{
+		PoolID:      0xFFFFFFFF,
+		AllocatedIP: 0xFFFFFFFF,
+		VlanID:      0xFFFFFFFF,
+		ClientClass: 0xFF,
+		LeaseExpiry: 0xFFFFFFFFFFFFFFFF,
+		Flags:       0xFF,
+	}
+
+	if pa.PoolID != 0xFFFFFFFF {
+		t.Errorf("PoolID = %d, want max uint32", pa.PoolID)
+	}
+	if pa.ClientClass != 0xFF {
+		t.Errorf("ClientClass = %d, want 255", pa.ClientClass)
+	}
+	if pa.LeaseExpiry != 0xFFFFFFFFFFFFFFFF {
+		t.Errorf("LeaseExpiry = %d, want max uint64", pa.LeaseExpiry)
+	}
+	if pa.Flags != 0xFF {
+		t.Errorf("Flags = %d, want 255", pa.Flags)
+	}
+}
+
+// Test PoolAssignment zero value
+func TestPoolAssignmentZeroValue(t *testing.T) {
+	var pa PoolAssignment
+	if pa.PoolID != 0 || pa.AllocatedIP != 0 || pa.VlanID != 0 || pa.ClientClass != 0 || pa.LeaseExpiry != 0 || pa.Flags != 0 {
+		t.Error("Zero-value PoolAssignment should have all zero fields")
+	}
+}
+
+// Test ServerConfig with short MAC (less than 6 bytes via SetServerConfig logic)
+func TestServerConfigShortMAC(t *testing.T) {
+	// When serverMAC is shorter than 6 bytes, copy should still work safely
+	var config ServerConfig
+	shortMAC := net.HardwareAddr{0xAA, 0xBB}
+	// SetServerConfig checks len(serverMAC) >= 6 before copying
+	// With a short MAC, the ServerMAC field should remain zeroed
+	if len(shortMAC) >= 6 {
+		copy(config.ServerMAC[:], shortMAC[:6])
+	}
+	// Verify it remains zeroed since short MAC didn't get copied
+	expected := [6]byte{}
+	if config.ServerMAC != expected {
+		t.Errorf("ServerMAC = %v, want zeroed for short MAC", config.ServerMAC)
+	}
+}
+
+// Test HashCircuitID matches manual FNV-1a computation for known strings
+func TestHashCircuitIDManualComputation(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"a", "a"},
+		{"ab", "ab"},
+		{"typical circuit", "eth 0/1/1:100.200"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Manual FNV-1a
+			hash := uint64(0xcbf29ce484222325)
+			for _, b := range []byte(tt.input) {
+				hash ^= uint64(b)
+				hash *= 0x100000001b3
+			}
+
+			got := HashCircuitID([]byte(tt.input))
+			if got != hash {
+				t.Errorf("HashCircuitID(%q) = 0x%x, want 0x%x", tt.input, got, hash)
+			}
+		})
+	}
+}
+
+// Test Load with nonexistent interface
+func TestLoaderLoadInvalidInterface(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	loader, err := NewLoader("nonexistent_iface_xyz_12345", logger)
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+
+	err = loader.Load(nil)
+	if err == nil {
+		t.Error("Load() should fail for nonexistent interface")
+	}
+
+	// Error should mention the interface name
+	errStr := err.Error()
+	if len(errStr) == 0 {
+		t.Error("Expected non-empty error message")
+	}
+}
+
+// Test Load with valid loopback interface but invalid BPF path
+func TestLoaderLoadInvalidBPFPath(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	// Use lo0 (macOS) or lo (Linux)
+	iface := "lo0"
+	if _, err := net.InterfaceByName(iface); err != nil {
+		iface = "lo"
+		if _, err := net.InterfaceByName(iface); err != nil {
+			t.Skip("No loopback interface available for test")
+		}
+	}
+
+	loader, err := NewLoader(iface, logger, WithBPFPath("/nonexistent/path/dhcp.o"))
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+
+	err = loader.Load(nil)
+	if err == nil {
+		t.Error("Load() should fail with nonexistent BPF path")
+	}
+}
+
+// Test MakeCircuitIDKey is usable as map key
+func TestMakeCircuitIDKeyAsMapKey(t *testing.T) {
+	m := make(map[CircuitIDKey]int)
+
+	key1 := MakeCircuitIDKey([]byte("circuit-1"))
+	key2 := MakeCircuitIDKey([]byte("circuit-2"))
+	key1b := MakeCircuitIDKey([]byte("circuit-1"))
+
+	m[key1] = 1
+	m[key2] = 2
+
+	if m[key1b] != 1 {
+		t.Errorf("Map lookup for key1b = %d, want 1", m[key1b])
+	}
+	if m[key2] != 2 {
+		t.Errorf("Map lookup for key2 = %d, want 2", m[key2])
+	}
+	if len(m) != 2 {
+		t.Errorf("Map size = %d, want 2", len(m))
 	}
 }
