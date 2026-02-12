@@ -165,6 +165,13 @@ var (
 	pppoeAuthType       string        // Authentication type: pap, chap, or both
 	pppoeSessionTimeout time.Duration // Session idle timeout
 	pppoeMRU            uint16        // Maximum Receive Unit
+
+	// BGP configuration (Issue #48)
+	bgpEnabled    bool   // Enable BGP controller
+	bgpLocalAS    uint32 // Local autonomous system number
+	bgpRouterID   string // BGP router ID (IP address)
+	bgpNeighbors  string // Comma-separated neighbor addresses (format: ip:as, e.g., "10.0.0.1:65001,10.0.0.2:65002")
+	bgpBFDEnabled bool   // Enable BFD for BGP neighbors
 )
 
 func init() {
@@ -362,6 +369,18 @@ func init() {
 		"Session idle timeout")
 	runCmd.Flags().Uint16Var(&pppoeMRU, "pppoe-mru", 1492,
 		"Maximum Receive Unit")
+
+	// BGP flags (Issue #48)
+	runCmd.Flags().BoolVar(&bgpEnabled, "bgp-enabled", false,
+		"Enable BGP controller for upstream route management")
+	runCmd.Flags().Uint32Var(&bgpLocalAS, "bgp-local-as", 0,
+		"BGP local autonomous system number")
+	runCmd.Flags().StringVar(&bgpRouterID, "bgp-router-id", "",
+		"BGP router ID (IP address, defaults to server IP)")
+	runCmd.Flags().StringVar(&bgpNeighbors, "bgp-neighbors", "",
+		"BGP neighbors (comma-separated ip:as pairs, e.g., '10.0.0.1:65001,10.0.0.2:65002')")
+	runCmd.Flags().BoolVar(&bgpBFDEnabled, "bgp-bfd-enabled", false,
+		"Enable BFD for fast failover detection on BGP neighbors")
 
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)
