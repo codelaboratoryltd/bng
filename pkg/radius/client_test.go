@@ -497,7 +497,7 @@ func TestRateLimitCustomConfig(t *testing.T) {
 	}
 }
 
-// Issue #91: Test rate limiting blocks on cancelled context
+// Issue #91: Test rate limiting blocks on canceled context
 func TestRateLimitCancelledContext(t *testing.T) {
 	logger := zap.NewNop()
 	cfg := ClientConfig{
@@ -522,13 +522,13 @@ func TestRateLimitCancelledContext(t *testing.T) {
 		t.Fatalf("first waitRateLimit should succeed: %v", err)
 	}
 
-	// Second call with an already-cancelled context should fail
-	cancelledCtx, cancel := context.WithCancel(ctx)
+	// Second call with an already-canceled context should fail
+	canceledCtx, cancel := context.WithCancel(ctx)
 	cancel()
 
-	err = client.waitRateLimit(cancelledCtx)
+	err = client.waitRateLimit(canceledCtx)
 	if err == nil {
-		t.Error("waitRateLimit with cancelled context should return error")
+		t.Error("waitRateLimit with canceled context should return error")
 	}
 }
 

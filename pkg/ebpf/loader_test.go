@@ -1,6 +1,7 @@
 package ebpf
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"runtime"
@@ -1278,7 +1279,7 @@ func TestLoaderLoadInvalidInterface(t *testing.T) {
 		t.Fatalf("NewLoader failed: %v", err)
 	}
 
-	err = loader.Load(nil)
+	err = loader.Load(context.TODO())
 	if err == nil {
 		t.Error("Load() should fail for nonexistent interface")
 	}
@@ -1307,7 +1308,7 @@ func TestLoaderLoadInvalidBPFPath(t *testing.T) {
 		t.Fatalf("NewLoader failed: %v", err)
 	}
 
-	err = loader.Load(nil)
+	err = loader.Load(context.TODO())
 	if err == nil {
 		t.Error("Load() should fail with nonexistent BPF path")
 	}
