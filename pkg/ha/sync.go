@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +51,15 @@ type SyncConfig struct {
 
 	// RequestTimeout is the timeout for HTTP requests.
 	RequestTimeout time.Duration
+
+	// TLS configuration for peer-to-peer sync.
+	// When TLSEnabled is true, the syncer uses HTTPS for peer communication
+	// and configures the HA HTTP server with TLS.
+	TLSEnabled    bool
+	TLSCertFile   string // Path to TLS certificate (PEM)
+	TLSKeyFile    string // Path to TLS private key (PEM)
+	TLSCAFile     string // Path to CA certificate bundle (PEM) for peer verification
+	TLSSkipVerify bool   // Skip TLS verification (testing only)
 }
 
 // DefaultSyncConfig returns sensible defaults for sync configuration.
@@ -101,11 +113,29 @@ type HASyncer struct {
 func NewHASyncer(config SyncConfig, store SessionStore, logger *zap.Logger) *HASyncer {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	client := &http.Client{Timeout: config.RequestTimeout}
+
+	// Configure TLS transport if enabled
+	if config.TLSEnabled {
+		tlsConfig, err := buildTLSConfig(config)
+		if err != nil {
+			logger.Error("Failed to build TLS config, falling back to plain HTTP", zap.Error(err))
+		} else {
+			client.Transport = &http.Transport{
+				TLSClientConfig: tlsConfig,
+			}
+			logger.Info("TLS enabled for HA peer sync",
+				zap.Bool("mtls", config.TLSCertFile != "" && config.TLSKeyFile != ""),
+				zap.Bool("skip_verify", config.TLSSkipVerify),
+			)
+		}
+	}
+
 	return &HASyncer{
 		config:           config,
 		logger:           logger,
 		store:            store,
-		client:           &http.Client{Timeout: config.RequestTimeout},
+		client:           client,
 		pendingChanges:   make(chan *SyncMessage, 1000),
 		receivedSessions: make(map[string]*SessionState),
 		sseClients:       make(map[string]chan *SyncMessage),
@@ -115,6 +145,40 @@ func NewHASyncer(config SyncConfig, store SessionStore, logger *zap.Logger) *HAS
 		ctx:              ctx,
 		cancel:           cancel,
 	}
+}
+
+// buildTLSConfig creates a tls.Config from the SyncConfig TLS settings.
+func buildTLSConfig(config SyncConfig) (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: config.TLSSkipVerify,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	// Load client certificate for mTLS
+	if config.TLSCertFile != "" && config.TLSKeyFile != "" {
+		cert, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load TLS key pair: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	// Load CA certificate pool for peer verification
+	if config.TLSCAFile != "" {
+		caCert, err := os.ReadFile(config.TLSCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA file: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+		tlsConfig.RootCAs = caPool
+		tlsConfig.ClientCAs = caPool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	return tlsConfig, nil
 }
 
 // Start begins the sync process.
@@ -179,12 +243,30 @@ func (s *HASyncer) startActive() error {
 		Handler: mux,
 	}
 
+	// Configure TLS on the server if enabled
+	if s.config.TLSEnabled {
+		tlsConfig, err := buildTLSConfig(s.config)
+		if err != nil {
+			return fmt.Errorf("build server TLS config: %w", err)
+		}
+		s.server.TLSConfig = tlsConfig
+	}
+
 	// Start server in goroutine
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.logger.Info("Starting HA sync server", zap.String("addr", s.config.ListenAddr))
-		if err := s.server.ListenAndServe(); err != http.ErrServerClosed {
+		s.logger.Info("Starting HA sync server",
+			zap.String("addr", s.config.ListenAddr),
+			zap.Bool("tls", s.config.TLSEnabled),
+		)
+		var err error
+		if s.config.TLSEnabled && s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
+			err = s.server.ListenAndServeTLS(s.config.TLSCertFile, s.config.TLSKeyFile)
+		} else {
+			err = s.server.ListenAndServe()
+		}
+		if err != http.ErrServerClosed {
 			s.logger.Error("HA sync server error", zap.Error(err))
 		}
 	}()
@@ -444,9 +526,17 @@ func (s *HASyncer) standbyLoop() {
 	}
 }
 
+// peerScheme returns "https" if TLS is enabled, "http" otherwise.
+func (s *HASyncer) peerScheme() string {
+	if s.config.TLSEnabled {
+		return "https"
+	}
+	return "http"
+}
+
 // performFullSync requests all sessions from the active node.
 func (s *HASyncer) performFullSync() error {
-	url := fmt.Sprintf("http://%s/ha/sessions", s.config.Partner.Endpoint)
+	url := fmt.Sprintf("%s://%s/ha/sessions", s.peerScheme(), s.config.Partner.Endpoint)
 
 	ctx, cancel := context.WithTimeout(s.ctx, s.config.RequestTimeout)
 	defer cancel()
@@ -504,7 +594,7 @@ func (s *HASyncer) performFullSync() error {
 
 // connectToStream connects to the SSE stream from the active node.
 func (s *HASyncer) connectToStream() error {
-	url := fmt.Sprintf("http://%s/ha/sessions/stream", s.config.Partner.Endpoint)
+	url := fmt.Sprintf("%s://%s/ha/sessions/stream", s.peerScheme(), s.config.Partner.Endpoint)
 
 	req, err := http.NewRequestWithContext(s.ctx, "GET", url, nil)
 	if err != nil {
