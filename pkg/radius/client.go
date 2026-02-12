@@ -374,7 +374,7 @@ func (c *Client) parseAuthAttributes(response *radius.Packet, authResp *AuthResp
 }
 
 // waitRateLimit blocks until the per-server rate limiter allows a request,
-// or returns an error if the context is cancelled while waiting.
+// or returns an error if the context is canceled while waiting.
 func (c *Client) waitRateLimit(ctx context.Context) error {
 	c.mu.Lock()
 	limiter := c.limiters[c.currentIdx]

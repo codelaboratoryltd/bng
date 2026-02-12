@@ -658,8 +658,9 @@ func TestConcurrentDiscoverRequests(t *testing.T) {
 		t.Errorf("concurrent discover error: %v", err)
 	}
 
-	if srv.ActiveLeases() != 0 {
-		// Discover doesn't create leases, only Request does
+	// Discover doesn't create leases, only Request does
+	if leases := srv.ActiveLeases(); leases != 0 {
+		t.Errorf("expected 0 active leases after Discover, got %d", leases)
 	}
 }
 
@@ -1452,7 +1453,7 @@ func TestHandleDiscover_PoolExhausted(t *testing.T) {
 
 	// Exhaust the pool
 	stats := pool.Stats()
-	for i := 0; i < int(stats.Available); i++ {
+	for i := 0; i < stats.Available; i++ {
 		mac, _ := net.ParseMAC(fmt.Sprintf("aa:bb:cc:dd:%02x:%02x", i/256, i%256))
 		_, err := pool.Allocate(mac)
 		if err != nil {
