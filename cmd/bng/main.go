@@ -140,9 +140,13 @@ var (
 	peerListenAddr string   // Listen address for peer API
 
 	// HA Pair (Demo H - active/standby with P2P sync)
-	haPeerURL    string // HA peer URL for P2P state sync
-	haRole       string // HA role: active or standby
-	haListenAddr string // HA sync listen address
+	haPeerURL      string // HA peer URL for P2P state sync
+	haRole         string // HA role: active or standby
+	haListenAddr   string // HA sync listen address
+	haTLSCert      string // HA TLS certificate file
+	haTLSKey       string // HA TLS private key file
+	haTLSCA        string // HA TLS CA certificate file
+	haTLSSkipVerif bool   // Skip TLS verification
 
 	// Resilience configuration (Issue #65)
 	healthCheckInterval time.Duration // Interval for checking Nexus/peer health
@@ -324,6 +328,14 @@ func init() {
 		"HA role: active or standby (empty = no HA)")
 	runCmd.Flags().StringVar(&haListenAddr, "ha-listen", ":9000",
 		"HA sync listen address (active node only)")
+	runCmd.Flags().StringVar(&haTLSCert, "ha-tls-cert", "",
+		"Path to TLS certificate for HA peer sync (PEM format)")
+	runCmd.Flags().StringVar(&haTLSKey, "ha-tls-key", "",
+		"Path to TLS private key for HA peer sync (PEM format)")
+	runCmd.Flags().StringVar(&haTLSCA, "ha-tls-ca", "",
+		"Path to CA certificate for HA peer verification (PEM format)")
+	runCmd.Flags().BoolVar(&haTLSSkipVerif, "ha-tls-skip-verify", false,
+		"Skip TLS verification for HA peer sync (INSECURE - testing only)")
 
 	// Resilience flags (Issue #65)
 	runCmd.Flags().DurationVar(&healthCheckInterval, "health-check-interval", 5*time.Second,
@@ -598,6 +610,20 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		haConfig := ha.DefaultSyncConfig()
 		haConfig.ListenAddr = haListenAddr
 
+		// Configure TLS if cert and key are provided
+		if haTLSCert != "" && haTLSKey != "" {
+			haConfig.TLSEnabled = true
+			haConfig.TLSCertFile = haTLSCert
+			haConfig.TLSKeyFile = haTLSKey
+			haConfig.TLSCAFile = haTLSCA
+			haConfig.TLSSkipVerify = haTLSSkipVerif
+			logger.Info("HA TLS enabled",
+				zap.String("cert", haTLSCert),
+				zap.String("ca", haTLSCA),
+				zap.Bool("skip_verify", haTLSSkipVerif),
+			)
+		}
+
 		// Determine node ID for HA
 		haNodeID := peerNodeID
 		if haNodeID == "" {
@@ -619,10 +645,13 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			if haPeerURL == "" {
 				return fmt.Errorf("--ha-peer is required when --ha-role=standby")
 			}
-			// Parse peer URL - remove http:// prefix if present for endpoint
+			// Parse peer URL - strip scheme prefix for endpoint
 			endpoint := haPeerURL
 			if len(endpoint) > 7 && endpoint[:7] == "http://" {
 				endpoint = endpoint[7:]
+			}
+			if len(endpoint) > 8 && endpoint[:8] == "https://" {
+				endpoint = endpoint[8:]
 			}
 			haConfig.Partner = &ha.PartnerInfo{
 				NodeID:   "active", // Will be updated on first sync
@@ -631,6 +660,7 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			logger.Info("HA mode: standby",
 				zap.String("node_id", haNodeID),
 				zap.String("peer", endpoint),
+				zap.Bool("tls", haConfig.TLSEnabled),
 			)
 
 		default:
