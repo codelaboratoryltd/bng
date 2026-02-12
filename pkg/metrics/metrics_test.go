@@ -227,3 +227,62 @@ func TestCollect(t *testing.T) {
 	// Should not panic even with nil references
 	m.Collect()
 }
+
+// Issue #90: Test circuit-ID collision metrics
+func TestCircuitIDCollisionMetrics(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	m := New(nil, nil, nil, logger)
+
+	if m.circuitIDCollisionsTotal == nil {
+		t.Error("circuitIDCollisionsTotal not initialized")
+	}
+	if m.circuitIDCollisionRate == nil {
+		t.Error("circuitIDCollisionRate not initialized")
+	}
+
+	// Should not panic
+	m.RecordCircuitIDCollision()
+	m.RecordCircuitIDCollision()
+	m.SetCircuitIDCollisionRate(0.001)
+}
+
+// Issue #90: Test circuit-ID collision metrics registration
+func TestCircuitIDCollisionMetricsRegister(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	oldDefault := prometheus.DefaultRegisterer
+	prometheus.DefaultRegisterer = reg
+	defer func() { prometheus.DefaultRegisterer = oldDefault }()
+
+	logger, _ := zap.NewDevelopment()
+	m := New(nil, nil, nil, logger)
+
+	err := m.Register()
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	// Verify the metrics are queryable
+	m.RecordCircuitIDCollision()
+	m.SetCircuitIDCollisionRate(0.05)
+
+	// Gather and check metric names are registered
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather() error = %v", err)
+	}
+
+	found := map[string]bool{
+		"bng_circuit_id_hash_collisions_total": false,
+		"bng_circuit_id_collision_rate":        false,
+	}
+	for _, f := range families {
+		if _, ok := found[f.GetName()]; ok {
+			found[f.GetName()] = true
+		}
+	}
+	for name, ok := range found {
+		if !ok {
+			t.Errorf("Metric %q not found in registry", name)
+		}
+	}
+}
