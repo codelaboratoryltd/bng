@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 	"layeh.com/radius"
 	"layeh.com/radius/rfc2865"
 	"layeh.com/radius/rfc2866"
@@ -25,6 +26,7 @@ type Client struct {
 	retries    int
 	currentIdx int
 	mu         sync.Mutex
+	limiters   []*rate.Limiter // per-server rate limiters
 }
 
 // ServerConfig holds RADIUS server configuration
@@ -34,12 +36,20 @@ type ServerConfig struct {
 	Secret string
 }
 
+// RateLimitConfig configures per-server RADIUS rate limiting.
+// Prevents amplification attacks by capping outbound request rate.
+type RateLimitConfig struct {
+	RequestsPerSecond float64 // Sustained rate (default: 1000)
+	BurstSize         int     // Max burst above sustained rate (default: 100)
+}
+
 // ClientConfig holds RADIUS client configuration
 type ClientConfig struct {
-	Servers []ServerConfig
-	NASID   string
-	Timeout time.Duration
-	Retries int
+	Servers   []ServerConfig
+	NASID     string
+	Timeout   time.Duration
+	Retries   int
+	RateLimit RateLimitConfig
 }
 
 // AuthRequest holds authentication request parameters
@@ -119,17 +129,36 @@ func NewClient(cfg ClientConfig, logger *zap.Logger) (*Client, error) {
 		retries = 3
 	}
 
+	rps := cfg.RateLimit.RequestsPerSecond
+	if rps == 0 {
+		rps = 1000
+	}
+	burst := cfg.RateLimit.BurstSize
+	if burst == 0 {
+		burst = 100
+	}
+
+	limiters := make([]*rate.Limiter, len(cfg.Servers))
+	for i := range cfg.Servers {
+		limiters[i] = rate.NewLimiter(rate.Limit(rps), burst)
+	}
+
 	return &Client{
-		servers: cfg.Servers,
-		nasID:   cfg.NASID,
-		logger:  logger,
-		timeout: timeout,
-		retries: retries,
+		servers:  cfg.Servers,
+		nasID:    cfg.NASID,
+		logger:   logger,
+		timeout:  timeout,
+		retries:  retries,
+		limiters: limiters,
 	}, nil
 }
 
 // Authenticate sends an Access-Request and returns the response
 func (c *Client) Authenticate(ctx context.Context, req *AuthRequest) (*AuthResponse, error) {
+	if err := c.waitRateLimit(ctx); err != nil {
+		return nil, err
+	}
+
 	server := c.getServer()
 
 	packet := radius.New(radius.CodeAccessRequest, []byte(server.Secret))
@@ -219,6 +248,10 @@ func (c *Client) Authenticate(ctx context.Context, req *AuthRequest) (*AuthRespo
 
 // SendAccounting sends an Accounting-Request
 func (c *Client) SendAccounting(ctx context.Context, req *AcctRequest) error {
+	if err := c.waitRateLimit(ctx); err != nil {
+		return err
+	}
+
 	server := c.getServer()
 
 	// Accounting uses port +1 by convention
@@ -338,6 +371,20 @@ func (c *Client) parseAuthAttributes(response *radius.Packet, authResp *AuthResp
 	// - Mikrotik: Mikrotik-Rate-Limit
 	// - ChilliSpot: ChilliSpot-Bandwidth-Max-Up/Down
 	// For now, we'll use Filter-Id as a policy name lookup
+}
+
+// waitRateLimit blocks until the per-server rate limiter allows a request,
+// or returns an error if the context is cancelled while waiting.
+func (c *Client) waitRateLimit(ctx context.Context) error {
+	c.mu.Lock()
+	limiter := c.limiters[c.currentIdx]
+	serverHost := c.servers[c.currentIdx].Host
+	c.mu.Unlock()
+
+	if err := limiter.Wait(ctx); err != nil {
+		return fmt.Errorf("RADIUS rate limit exceeded for server %s: %w", serverHost, err)
+	}
+	return nil
 }
 
 // getServer returns the current RADIUS server

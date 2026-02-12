@@ -1,8 +1,10 @@
 package radius
 
 import (
+	"context"
 	"net"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -429,5 +431,153 @@ func TestAuthResponseClassAdditional(t *testing.T) {
 
 	if string(resp.Class) != string(classData) {
 		t.Error("Class data mismatch")
+	}
+}
+
+// Issue #91: Test rate limiting configuration defaults
+func TestRateLimitDefaults(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := ClientConfig{
+		Servers: []ServerConfig{
+			{Host: "127.0.0.1", Port: 1812, Secret: "testing123"},
+		},
+		NASID: "test-nas",
+	}
+
+	client, err := NewClient(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	if len(client.limiters) != 1 {
+		t.Fatalf("expected 1 limiter, got %d", len(client.limiters))
+	}
+
+	// Default should be 1000 req/s with burst 100
+	limiter := client.limiters[0]
+	if limiter.Limit() != 1000 {
+		t.Errorf("expected default rate 1000, got %v", limiter.Limit())
+	}
+	if limiter.Burst() != 100 {
+		t.Errorf("expected default burst 100, got %d", limiter.Burst())
+	}
+}
+
+// Issue #91: Test custom rate limit configuration
+func TestRateLimitCustomConfig(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := ClientConfig{
+		Servers: []ServerConfig{
+			{Host: "127.0.0.1", Port: 1812, Secret: "testing123"},
+			{Host: "127.0.0.2", Port: 1812, Secret: "testing456"},
+		},
+		NASID: "test-nas",
+		RateLimit: RateLimitConfig{
+			RequestsPerSecond: 500,
+			BurstSize:         50,
+		},
+	}
+
+	client, err := NewClient(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	if len(client.limiters) != 2 {
+		t.Fatalf("expected 2 limiters, got %d", len(client.limiters))
+	}
+
+	for i, lim := range client.limiters {
+		if lim.Limit() != 500 {
+			t.Errorf("limiter[%d] rate = %v, want 500", i, lim.Limit())
+		}
+		if lim.Burst() != 50 {
+			t.Errorf("limiter[%d] burst = %d, want 50", i, lim.Burst())
+		}
+	}
+}
+
+// Issue #91: Test rate limiting blocks on cancelled context
+func TestRateLimitCancelledContext(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := ClientConfig{
+		Servers: []ServerConfig{
+			{Host: "127.0.0.1", Port: 1812, Secret: "testing123"},
+		},
+		NASID: "test-nas",
+		RateLimit: RateLimitConfig{
+			RequestsPerSecond: 1, // Very low rate
+			BurstSize:         1, // Minimal burst
+		},
+	}
+
+	client, err := NewClient(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	// Consume the single burst token
+	ctx := context.Background()
+	if err := client.waitRateLimit(ctx); err != nil {
+		t.Fatalf("first waitRateLimit should succeed: %v", err)
+	}
+
+	// Second call with an already-cancelled context should fail
+	cancelledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	err = client.waitRateLimit(cancelledCtx)
+	if err == nil {
+		t.Error("waitRateLimit with cancelled context should return error")
+	}
+}
+
+// Issue #91: Test rate limiting allows burst
+func TestRateLimitBurst(t *testing.T) {
+	logger := zap.NewNop()
+	cfg := ClientConfig{
+		Servers: []ServerConfig{
+			{Host: "127.0.0.1", Port: 1812, Secret: "testing123"},
+		},
+		NASID: "test-nas",
+		RateLimit: RateLimitConfig{
+			RequestsPerSecond: 10,
+			BurstSize:         5,
+		},
+	}
+
+	client, err := NewClient(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+
+	// Should be able to consume burst tokens without delay
+	ctx := context.Background()
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		if err := client.waitRateLimit(ctx); err != nil {
+			t.Fatalf("waitRateLimit burst call %d failed: %v", i, err)
+		}
+	}
+	elapsed := time.Since(start)
+
+	// Burst of 5 should complete nearly instantly (well under 1s)
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("burst of 5 took %v, expected near-instant", elapsed)
+	}
+}
+
+// Issue #91: Test RateLimitConfig struct
+func TestRateLimitConfigStruct(t *testing.T) {
+	cfg := RateLimitConfig{
+		RequestsPerSecond: 2000,
+		BurstSize:         200,
+	}
+
+	if cfg.RequestsPerSecond != 2000 {
+		t.Errorf("RequestsPerSecond = %f, want 2000", cfg.RequestsPerSecond)
+	}
+	if cfg.BurstSize != 200 {
+		t.Errorf("BurstSize = %d, want 200", cfg.BurstSize)
 	}
 }

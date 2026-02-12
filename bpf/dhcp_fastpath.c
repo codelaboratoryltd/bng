@@ -284,10 +284,11 @@ static __always_inline int extract_circuit_id_fixed(void *dhcp_base,
 			/* Parse sub-option 1 (circuit-id) at start of Option 82 */
 			if (opts[5] == 1) {
 				__u8 cid_len = opts[6];
-				if (cid_len > 0 && cid_len <= 32 &&
+				/* Bounds check: cid_len must fit in destination buffer */
+				if (cid_len > 0 && cid_len <= CIRCUIT_ID_KEY_LEN &&
 				    (void *)(opts + 7 + cid_len) <= data_end) {
 					#pragma unroll
-					for (int i = 0; i < 32; i++) {
+					for (int i = 0; i < CIRCUIT_ID_KEY_LEN; i++) {
 						if (i < cid_len)
 							key->data[i] = opts[7 + i];
 					}
@@ -304,10 +305,11 @@ static __always_inline int extract_circuit_id_fixed(void *dhcp_base,
 			__u8 opt82_len = opts[pos + 1];
 			if (opt82_len >= 4 && opts[pos + 2] == 1) {
 				__u8 cid_len = opts[pos + 3];
-				if (cid_len > 0 && cid_len <= 32 &&
+				/* Bounds check: cid_len must fit in destination buffer */
+				if (cid_len > 0 && cid_len <= CIRCUIT_ID_KEY_LEN &&
 				    (void *)(opts + pos + 4 + cid_len) <= data_end) {
 					#pragma unroll
-					for (int i = 0; i < 32; i++) {
+					for (int i = 0; i < CIRCUIT_ID_KEY_LEN; i++) {
 						if (i < cid_len)
 							key->data[i] = opts[pos + 4 + i];
 					}

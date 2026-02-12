@@ -2,6 +2,7 @@ package ebpf
 
 import (
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -626,6 +627,25 @@ func TestDHCPStatsStruct(t *testing.T) {
 
 	if stats.VLANPackets != 20 {
 		t.Errorf("VLANPackets = %d, want 20", stats.VLANPackets)
+	}
+}
+
+// Issue #88: Test checkBPFCapabilities
+func TestCheckBPFCapabilities(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		// On non-Linux, /proc/self/status doesn't exist so the check is skipped
+		err := checkBPFCapabilities()
+		if err != nil {
+			t.Errorf("checkBPFCapabilities on non-Linux should skip: %v", err)
+		}
+		return
+	}
+
+	// On Linux, the function should not return an error when running as root
+	// or with appropriate capabilities (CI typically runs as root)
+	err := checkBPFCapabilities()
+	if err != nil {
+		t.Logf("checkBPFCapabilities returned (may be expected in unprivileged CI): %v", err)
 	}
 }
 

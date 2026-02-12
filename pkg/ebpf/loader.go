@@ -1,12 +1,15 @@
 package ebpf
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -123,8 +126,59 @@ func NewLoader(iface string, logger *zap.Logger, opts ...LoaderOption) (*Loader,
 	return l, nil
 }
 
+// checkBPFCapabilities verifies the process has CAP_BPF or CAP_SYS_ADMIN,
+// which are required to load eBPF programs. Returns nil if capable, or a
+// descriptive error explaining what capability is missing.
+func checkBPFCapabilities() error {
+	f, err := os.Open("/proc/self/status")
+	if err != nil {
+		// Not on Linux or /proc not mounted — skip the check
+		return nil
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "CapEff:") {
+			continue
+		}
+
+		hexStr := strings.TrimSpace(strings.TrimPrefix(line, "CapEff:"))
+		capEff, err := strconv.ParseUint(hexStr, 16, 64)
+		if err != nil {
+			return nil // Can't parse — skip check rather than block
+		}
+
+		const (
+			capSysAdmin = 21 // CAP_SYS_ADMIN
+			capBPF      = 39 // CAP_BPF (Linux 5.8+)
+		)
+
+		hasSysAdmin := capEff&(1<<capSysAdmin) != 0
+		hasBPF := capEff&(1<<capBPF) != 0
+
+		if hasSysAdmin || hasBPF {
+			return nil
+		}
+
+		return fmt.Errorf(
+			"insufficient capabilities to load eBPF programs: " +
+				"need CAP_BPF (Linux 5.8+) or CAP_SYS_ADMIN; " +
+				"run as root or use 'setcap cap_bpf+ep <binary>'",
+		)
+	}
+
+	return nil // CapEff line not found — skip check
+}
+
 // Load loads the eBPF program and attaches it to the interface
 func (l *Loader) Load(ctx context.Context) error {
+	// Check for required capabilities before attempting to load
+	if err := checkBPFCapabilities(); err != nil {
+		return err
+	}
+
 	l.logger.Info("Loading eBPF program",
 		zap.String("interface", l.iface),
 		zap.String("bpf_path", l.bpfPath),
