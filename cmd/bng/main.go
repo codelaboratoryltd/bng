@@ -677,6 +677,7 @@ func runBNG(cmd *cobra.Command, args []string) error {
 
 	// Initialize HA Syncer if configured (Demo H - active/standby with P2P sync)
 	var haSyncer *ha.HASyncer
+	var haFailover *ha.FailoverController
 	if haRole != "" {
 		// Create session store for HA
 		haSessionStore := ha.NewInMemorySessionStore()
@@ -750,6 +751,53 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			zap.String("role", haRole),
 			zap.String("node_id", haNodeID),
 		)
+
+		// Initialize HA failover controller with health monitoring.
+		// Requires partner info so we can health-check the peer.
+		// For standby, Partner is already set above.
+		// For active, build PartnerInfo from --ha-peer if provided.
+		partnerInfo := haConfig.Partner
+		if partnerInfo == nil && haPeerURL != "" {
+			endpoint := haPeerURL
+			if len(endpoint) > 7 && endpoint[:7] == "http://" {
+				endpoint = endpoint[7:]
+			}
+			if len(endpoint) > 8 && endpoint[:8] == "https://" {
+				endpoint = endpoint[8:]
+			}
+			partnerInfo = &ha.PartnerInfo{
+				NodeID:   "standby",
+				Endpoint: endpoint,
+			}
+		}
+
+		if partnerInfo != nil {
+			healthMonitor := ha.NewHealthMonitor(ha.DefaultHealthConfig(), partnerInfo, logger)
+			if err := healthMonitor.Start(); err != nil {
+				return fmt.Errorf("failed to start HA health monitor: %w", err)
+			}
+
+			failoverPriority := 50
+			if haConfig.Role == ha.RoleActive {
+				failoverPriority = 100
+			}
+
+			haFailover = ha.NewFailoverController(
+				ha.DefaultFailoverConfig(),
+				haNodeID,
+				haConfig.Role,
+				failoverPriority,
+				healthMonitor,
+				logger,
+			)
+			if err := haFailover.Start(); err != nil {
+				return fmt.Errorf("failed to start HA failover controller: %w", err)
+			}
+			logger.Info("HA failover controller started",
+				zap.String("role", haRole),
+				zap.Int("priority", failoverPriority),
+			)
+		}
 	}
 
 	// Initialize BGP controller if enabled (Issue #48)
@@ -1206,7 +1254,10 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			logger.Warn("Failed to stop peer pool API server", zap.Error(err))
 		}
 	}
-	// Stop HA syncer (Demo H)
+	// Stop HA failover controller and syncer (Demo H)
+	if haFailover != nil {
+		haFailover.Stop()
+	}
 	if haSyncer != nil {
 		if err := haSyncer.Stop(); err != nil {
 			logger.Warn("Failed to stop HA syncer", zap.Error(err))
