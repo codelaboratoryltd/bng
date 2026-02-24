@@ -25,6 +25,7 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/slaac"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -422,6 +423,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize logger: %w", err)
 	}
 	defer logger.Sync()
+
+	// Load config file before consuming flag values.
+	// CLI flags that were explicitly set take precedence.
+	if err := loadConfigFile(cmd, logger); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
 
 	logger.Info("Starting BNG",
 		zap.String("version", version),
@@ -823,6 +830,13 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			Interface:          iface,
 			BPFPath:            natBPFPath,
 			PortsPerSubscriber: natPortsPerSub,
+			InsideInterface:    natInsideInterface,
+			OutsideInterface:   natOutsideInterface,
+			EnableEIM:          natEIM,
+			EnableEIF:          natEIF,
+			EnableHairpin:      natHairpin,
+			EnableFTPALG:       natALGFTP,
+			EnableSIPALG:       natALGSIP,
 		}, logger)
 		if err != nil {
 			logger.Warn("Failed to create NAT manager", zap.Error(err))
@@ -856,9 +870,10 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			// Initialize NAT logging if enabled
 			if natLogEnabled {
 				natLogger, err = nat.NewLogger(nat.LoggerConfig{
-					Enabled:  true,
-					FilePath: natLogPath,
-					Format:   "json",
+					Enabled:     true,
+					FilePath:    natLogPath,
+					Format:      "json",
+					BulkLogging: natBulkLogging,
 				}, logger)
 				if err != nil {
 					logger.Warn("Failed to create NAT logger", zap.Error(err))
@@ -1107,6 +1122,45 @@ func initLogger(level string) (*zap.Logger, error) {
 	config.Encoding = "json"
 
 	return config.Build()
+}
+
+// loadConfigFile reads a YAML config file and applies values to unset flags.
+// CLI flags take precedence over config file values.
+func loadConfigFile(cmd *cobra.Command, logger *zap.Logger) error {
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read config file %s: %w", configFile, err)
+	}
+
+	var cfg map[string]string
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("failed to parse config file %s: %w", configFile, err)
+	}
+
+	logger.Info("Loaded config file", zap.String("path", configFile), zap.Int("keys", len(cfg)))
+
+	for key, val := range cfg {
+		f := cmd.Flags().Lookup(key)
+		if f == nil {
+			logger.Warn("Unknown config key, skipping", zap.String("key", key))
+			continue
+		}
+		if cmd.Flags().Changed(key) {
+			continue
+		}
+		if err := cmd.Flags().Set(key, val); err != nil {
+			logger.Warn("Failed to set config value",
+				zap.String("key", key),
+				zap.String("value", val),
+				zap.Error(err),
+			)
+		}
+	}
+
+	return nil
 }
 
 func splitAndTrim(s string) []string {
