@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codelaboratoryltd/bng/pkg/antispoof"
 	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 	"github.com/codelaboratoryltd/bng/pkg/dhcp"
 	"github.com/codelaboratoryltd/bng/pkg/dhcpv6"
@@ -181,6 +182,9 @@ var (
 	bgpRouterID   string // BGP router ID (IP address)
 	bgpNeighbors  string // Comma-separated neighbor addresses (format: ip:as, e.g., "10.0.0.1:65001,10.0.0.2:65002")
 	bgpBFDEnabled bool   // Enable BFD for BGP neighbors
+
+	// Anti-spoofing configuration
+	antispoofMode string // Anti-spoofing mode: disabled, strict, loose, log-only
 )
 
 func init() {
@@ -399,6 +403,10 @@ func init() {
 	runCmd.Flags().BoolVar(&bgpBFDEnabled, "bgp-bfd-enabled", false,
 		"Enable BFD for fast failover detection on BGP neighbors")
 
+	// Anti-spoofing flags
+	runCmd.Flags().StringVar(&antispoofMode, "antispoof-mode", "disabled",
+		"Anti-spoofing mode: disabled, strict, loose, log-only")
+
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(statsCmd)
@@ -484,6 +492,39 @@ func runBNG(cmd *cobra.Command, args []string) error {
 
 	if err := loader.Load(ctx); err != nil {
 		return fmt.Errorf("failed to load eBPF program: %w", err)
+	}
+
+	// Initialize anti-spoofing manager if enabled
+	var antispoofMgr *antispoof.Manager
+	if antispoofMode != "disabled" {
+		var mode antispoof.Mode
+		switch antispoofMode {
+		case "strict":
+			mode = antispoof.ModeStrict
+		case "loose":
+			mode = antispoof.ModeLoose
+		case "log-only":
+			mode = antispoof.ModeLogOnly
+		default:
+			return fmt.Errorf("invalid --antispoof-mode: %s (must be disabled, strict, loose, or log-only)", antispoofMode)
+		}
+
+		antispoofMgr, err = antispoof.NewManager(antispoof.ManagerConfig{
+			Interface:   iface,
+			DefaultMode: mode,
+			LogEnabled:  true,
+		}, logger)
+		if err != nil {
+			return fmt.Errorf("failed to create anti-spoofing manager: %w", err)
+		}
+
+		if err := antispoofMgr.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start anti-spoofing manager: %w", err)
+		}
+		logger.Info("Anti-spoofing manager started",
+			zap.String("mode", antispoofMode),
+			zap.String("interface", iface),
+		)
 	}
 
 	// Create pool manager
@@ -1284,6 +1325,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if resilienceManager != nil {
 		if err := resilienceManager.Stop(); err != nil {
 			logger.Warn("Failed to stop resilience manager", zap.Error(err))
+		}
+	}
+	// Stop anti-spoofing manager
+	if antispoofMgr != nil {
+		if err := antispoofMgr.Stop(); err != nil {
+			logger.Warn("Failed to stop anti-spoofing manager", zap.Error(err))
 		}
 	}
 	logger.Info("BNG stopped")
