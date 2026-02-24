@@ -184,6 +184,10 @@ type ManagerConfig struct {
 	PortRangeStart     int
 	PortRangeEnd       int
 
+	// Interface overrides (default to Interface if empty)
+	InsideInterface  string // Subscriber-facing interface
+	OutsideInterface string // Public-facing interface
+
 	// Feature flags
 	EnableEIM            bool // Endpoint-Independent Mapping (RFC 4787)
 	EnableEIF            bool // Endpoint-Independent Filtering

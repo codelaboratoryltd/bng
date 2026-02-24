@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codelaboratoryltd/bng/pkg/antispoof"
+	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 	"github.com/codelaboratoryltd/bng/pkg/dhcp"
 	"github.com/codelaboratoryltd/bng/pkg/dhcpv6"
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
@@ -19,12 +21,16 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/nat"
 	"github.com/codelaboratoryltd/bng/pkg/nexus"
 	"github.com/codelaboratoryltd/bng/pkg/pool"
+	"github.com/codelaboratoryltd/bng/pkg/pppoe"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
+	"github.com/codelaboratoryltd/bng/pkg/resilience"
 	"github.com/codelaboratoryltd/bng/pkg/routing"
 	"github.com/codelaboratoryltd/bng/pkg/slaac"
+	"github.com/codelaboratoryltd/bng/pkg/walledgarden"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -177,6 +183,13 @@ var (
 	bgpRouterID   string // BGP router ID (IP address)
 	bgpNeighbors  string // Comma-separated neighbor addresses (format: ip:as, e.g., "10.0.0.1:65001,10.0.0.2:65002")
 	bgpBFDEnabled bool   // Enable BFD for BGP neighbors
+
+	// Anti-spoofing configuration
+	antispoofMode string // Anti-spoofing mode: disabled, strict, loose, log-only
+
+	// Walled garden configuration
+	walledGardenEnabled bool   // Enable walled garden (captive portal)
+	walledGardenPortal  string // Portal address (IP:port)
 )
 
 func init() {
@@ -395,6 +408,16 @@ func init() {
 	runCmd.Flags().BoolVar(&bgpBFDEnabled, "bgp-bfd-enabled", false,
 		"Enable BFD for fast failover detection on BGP neighbors")
 
+	// Anti-spoofing flags
+	runCmd.Flags().StringVar(&antispoofMode, "antispoof-mode", "disabled",
+		"Anti-spoofing mode: disabled, strict, loose, log-only")
+
+	// Walled garden flags
+	runCmd.Flags().BoolVar(&walledGardenEnabled, "walled-garden", false,
+		"Enable walled garden (captive portal redirect for unauthenticated subscribers)")
+	runCmd.Flags().StringVar(&walledGardenPortal, "walled-garden-portal", "10.255.255.1:8080",
+		"Walled garden portal address (IP:port)")
+
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(statsCmd)
@@ -422,6 +445,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to initialize logger: %w", err)
 	}
 	defer logger.Sync()
+
+	// Load config file before consuming flag values.
+	// CLI flags that were explicitly set take precedence.
+	if err := loadConfigFile(cmd, logger); err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
 
 	logger.Info("Starting BNG",
 		zap.String("version", version),
@@ -476,6 +505,64 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load eBPF program: %w", err)
 	}
 
+	// Initialize anti-spoofing manager if enabled
+	var antispoofMgr *antispoof.Manager
+	if antispoofMode != "disabled" {
+		var mode antispoof.Mode
+		switch antispoofMode {
+		case "strict":
+			mode = antispoof.ModeStrict
+		case "loose":
+			mode = antispoof.ModeLoose
+		case "log-only":
+			mode = antispoof.ModeLogOnly
+		default:
+			return fmt.Errorf("invalid --antispoof-mode: %s (must be disabled, strict, loose, or log-only)", antispoofMode)
+		}
+
+		antispoofMgr, err = antispoof.NewManager(antispoof.ManagerConfig{
+			Interface:   iface,
+			DefaultMode: mode,
+			LogEnabled:  true,
+		}, logger)
+		if err != nil {
+			return fmt.Errorf("failed to create anti-spoofing manager: %w", err)
+		}
+
+		if err := antispoofMgr.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start anti-spoofing manager: %w", err)
+		}
+		logger.Info("Anti-spoofing manager started",
+			zap.String("mode", antispoofMode),
+			zap.String("interface", iface),
+		)
+	}
+
+	// Initialize walled garden manager if enabled
+	var walledGardenMgr *walledgarden.Manager
+	if walledGardenEnabled {
+		portalHost, portalPortStr := parseHostPort(walledGardenPortal, 8080)
+		portalIP := net.ParseIP(portalHost)
+		if portalIP == nil {
+			return fmt.Errorf("invalid --walled-garden-portal IP: %s", portalHost)
+		}
+
+		wgCfg := walledgarden.DefaultConfig()
+		wgCfg.Interface = iface
+		wgCfg.PortalIP = portalIP
+		wgCfg.PortalPort = uint16(portalPortStr)
+
+		walledGardenMgr = walledgarden.NewManager(wgCfg, logger)
+		if err := walledGardenMgr.Start(); err != nil {
+			return fmt.Errorf("failed to start walled garden manager: %w", err)
+		}
+		logger.Info("Walled garden manager started",
+			zap.String("portal_ip", portalIP.String()),
+			zap.Int("portal_port", portalPortStr),
+			zap.String("interface", iface),
+		)
+	}
+
 	// Create pool manager
 	poolMgr := dhcp.NewPoolManager(loader, logger)
 
@@ -506,6 +593,51 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to add default pool: %w", err)
 	}
 
+	// Warn if lease mode is selected but no distributed backend is active
+	if poolMode == "lease" && nexusURL == "" && len(peerAddrs) == 0 && peerDiscovery != "dns" {
+		logger.Warn("pool-mode=lease requires Nexus or peer pool for epoch-based expiry; "+
+			"the default DHCP pool does not support epoch mode",
+			zap.String("pool_mode", poolMode),
+		)
+	}
+
+	// Resolve auth PSK from file or direct flag (needed before Nexus init)
+	resolvedAuthPSK := resolveSecret(authPSK, authPSKFile, "auth-psk", "auth-psk-file", logger)
+
+	// Build device authenticator from flags
+	authCfg := deviceauth.Config{
+		Mode: deviceauth.AuthMode(authMode),
+	}
+	if authMode == "psk" && resolvedAuthPSK != "" {
+		authCfg.PSK = &deviceauth.PSKConfig{
+			Key: resolvedAuthPSK,
+		}
+	}
+	if authMode == "mtls" {
+		authCfg.MTLS = &deviceauth.MTLSConfig{
+			CertFile:           authMTLSCert,
+			KeyFile:            authMTLSKey,
+			CAFile:             authMTLSCA,
+			ServerName:         authMTLSServerName,
+			InsecureSkipVerify: authMTLSInsecure,
+		}
+	}
+
+	var nexusAllocatorOpts []nexus.HTTPAllocatorOption
+	if authMode != "none" && authMode != "" {
+		authenticator, authErr := deviceauth.NewAuthenticator(authCfg, logger)
+		if authErr != nil {
+			return fmt.Errorf("failed to create device authenticator: %w", authErr)
+		}
+		defer authenticator.Close()
+
+		authClient := deviceauth.NewAuthenticatedClient(authenticator)
+		nexusAllocatorOpts = append(nexusAllocatorOpts, nexus.WithHTTPClient(authClient))
+		logger.Info("Device authentication configured",
+			zap.String("mode", authMode),
+		)
+	}
+
 	// Create DHCP slow path server
 	dhcpServer, err := dhcp.NewServer(dhcp.ServerConfig{
 		Interface:         iface,
@@ -518,7 +650,7 @@ func runBNG(cmd *cobra.Command, args []string) error {
 
 	// Initialize Nexus HTTPAllocator if configured (Demo E - RADIUS-less mode)
 	if nexusURL != "" {
-		httpAllocator := nexus.NewHTTPAllocator(nexusURL)
+		httpAllocator := nexus.NewHTTPAllocator(nexusURL, nexusAllocatorOpts...)
 
 		// Verify connectivity to Nexus
 		if err := httpAllocator.HealthCheck(ctx); err != nil {
@@ -618,10 +750,14 @@ func runBNG(cmd *cobra.Command, args []string) error {
 				logger.Error("Peer pool API server error", zap.Error(err))
 			}
 		}()
+
+		// Start peer health checking
+		peerPool.Start(ctx)
 	}
 
 	// Initialize HA Syncer if configured (Demo H - active/standby with P2P sync)
 	var haSyncer *ha.HASyncer
+	var haFailover *ha.FailoverController
 	if haRole != "" {
 		// Create session store for HA
 		haSessionStore := ha.NewInMemorySessionStore()
@@ -695,6 +831,53 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			zap.String("role", haRole),
 			zap.String("node_id", haNodeID),
 		)
+
+		// Initialize HA failover controller with health monitoring.
+		// Requires partner info so we can health-check the peer.
+		// For standby, Partner is already set above.
+		// For active, build PartnerInfo from --ha-peer if provided.
+		partnerInfo := haConfig.Partner
+		if partnerInfo == nil && haPeerURL != "" {
+			endpoint := haPeerURL
+			if len(endpoint) > 7 && endpoint[:7] == "http://" {
+				endpoint = endpoint[7:]
+			}
+			if len(endpoint) > 8 && endpoint[:8] == "https://" {
+				endpoint = endpoint[8:]
+			}
+			partnerInfo = &ha.PartnerInfo{
+				NodeID:   "standby",
+				Endpoint: endpoint,
+			}
+		}
+
+		if partnerInfo != nil {
+			healthMonitor := ha.NewHealthMonitor(ha.DefaultHealthConfig(), partnerInfo, logger)
+			if err := healthMonitor.Start(); err != nil {
+				return fmt.Errorf("failed to start HA health monitor: %w", err)
+			}
+
+			failoverPriority := 50
+			if haConfig.Role == ha.RoleActive {
+				failoverPriority = 100
+			}
+
+			haFailover = ha.NewFailoverController(
+				ha.DefaultFailoverConfig(),
+				haNodeID,
+				haConfig.Role,
+				failoverPriority,
+				healthMonitor,
+				logger,
+			)
+			if err := haFailover.Start(); err != nil {
+				return fmt.Errorf("failed to start HA failover controller: %w", err)
+			}
+			logger.Info("HA failover controller started",
+				zap.String("role", haRole),
+				zap.Int("priority", failoverPriority),
+			)
+		}
 	}
 
 	// Initialize BGP controller if enabled (Issue #48)
@@ -759,10 +942,6 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	// Resolve RADIUS secret from file or direct flag
 	resolvedRadiusSecret := resolveSecret(radiusSecret, radiusSecretFile, "radius-secret", "radius-secret-file", logger)
 
-	// Resolve auth PSK from file or direct flag
-	resolvedAuthPSK := resolveSecret(authPSK, authPSKFile, "auth-psk", "auth-psk-file", logger)
-	_ = resolvedAuthPSK // used when device auth is wired up
-
 	// Initialize RADIUS client if enabled
 	var radiusClient *radius.Client
 	var policyMgr *radius.PolicyManager
@@ -823,6 +1002,13 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			Interface:          iface,
 			BPFPath:            natBPFPath,
 			PortsPerSubscriber: natPortsPerSub,
+			InsideInterface:    natInsideInterface,
+			OutsideInterface:   natOutsideInterface,
+			EnableEIM:          natEIM,
+			EnableEIF:          natEIF,
+			EnableHairpin:      natHairpin,
+			EnableFTPALG:       natALGFTP,
+			EnableSIPALG:       natALGSIP,
 		}, logger)
 		if err != nil {
 			logger.Warn("Failed to create NAT manager", zap.Error(err))
@@ -856,9 +1042,10 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			// Initialize NAT logging if enabled
 			if natLogEnabled {
 				natLogger, err = nat.NewLogger(nat.LoggerConfig{
-					Enabled:  true,
-					FilePath: natLogPath,
-					Format:   "json",
+					Enabled:     true,
+					FilePath:    natLogPath,
+					Format:      "json",
+					BulkLogging: natBulkLogging,
 				}, logger)
 				if err != nil {
 					logger.Warn("Failed to create NAT logger", zap.Error(err))
@@ -869,6 +1056,52 @@ func runBNG(cmd *cobra.Command, args []string) error {
 					)
 				}
 			}
+		}
+	}
+
+	// Initialize PPPoE server if enabled
+	var pppoeServer *pppoe.Server
+	if pppoeEnabled {
+		pppoeIface := pppoeInterface
+		if pppoeIface == "" {
+			pppoeIface = iface
+		}
+
+		// Parse DNS for PPPoE
+		pppoeDNS := splitAndTrim(poolDNS)
+		var primaryDNS, secondaryDNS string
+		if len(pppoeDNS) > 0 {
+			primaryDNS = pppoeDNS[0]
+		}
+		if len(pppoeDNS) > 1 {
+			secondaryDNS = pppoeDNS[1]
+		}
+
+		pppoeServer, err = pppoe.NewServer(pppoe.ServerConfig{
+			Interface:      pppoeIface,
+			ACName:         pppoeACName,
+			ServiceName:    pppoeServiceName,
+			ServerIP:       srvIP.String(),
+			ClientPool:     poolNetwork,
+			PoolGateway:    poolGateway,
+			PrimaryDNS:     primaryDNS,
+			SecondaryDNS:   secondaryDNS,
+			AuthType:       pppoeAuthType,
+			SessionTimeout: pppoeSessionTimeout,
+			MRU:            pppoeMRU,
+		}, logger)
+		if err != nil {
+			logger.Warn("Failed to create PPPoE server", zap.Error(err))
+		} else {
+			if radiusClient != nil {
+				pppoeServer.SetRADIUSClient(radiusClient)
+			}
+			logger.Info("PPPoE server configured",
+				zap.String("interface", pppoeIface),
+				zap.String("ac_name", pppoeACName),
+				zap.String("auth_type", pppoeAuthType),
+				zap.Uint16("mru", pppoeMRU),
+			)
 		}
 	}
 
@@ -946,6 +1179,37 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Initialize resilience manager
+	var resilienceManager *resilience.Manager
+	{
+		resCfg := resilience.DefaultPartitionConfig()
+		resCfg.HealthCheckInterval = healthCheckInterval
+		resCfg.HealthCheckRetries = healthCheckRetries
+		resCfg.RADIUSPartitionMode = resilience.RADIUSPartitionMode(radiusPartitionMode)
+		resCfg.ShortLeaseEnabled = shortLeaseEnabled
+		resCfg.ShortLeaseThreshold = shortLeaseThreshold
+		resCfg.ShortLeaseDuration = shortLeaseDuration
+
+		hostname, _ := os.Hostname()
+		checker := &bngHealthChecker{
+			nexusURL:      nexusURL,
+			radiusServers: radiusServers,
+			radiusEnabled: radiusEnabled,
+		}
+		resilienceManager = resilience.NewManager(resCfg, hostname, checker, logger)
+		if err := resilienceManager.Start(); err != nil {
+			logger.Warn("Failed to start resilience manager", zap.Error(err))
+			resilienceManager = nil
+		} else {
+			logger.Info("Resilience manager started",
+				zap.Duration("health_check_interval", healthCheckInterval),
+				zap.Int("health_check_retries", healthCheckRetries),
+				zap.String("radius_partition_mode", radiusPartitionMode),
+				zap.Bool("short_lease_enabled", shortLeaseEnabled),
+			)
+		}
+	}
+
 	// Create and register metrics
 	metricsCollector := metrics.New(loader, poolMgr, dhcpServer, logger)
 	if err := metricsCollector.Register(); err != nil {
@@ -1006,12 +1270,26 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Start PPPoE server if enabled
+	if pppoeServer != nil {
+		go func() {
+			if err := pppoeServer.Start(ctx); err != nil {
+				logger.Error("PPPoE server error", zap.Error(err))
+			}
+		}()
+		logger.Info("PPPoE server started",
+			zap.String("interface", pppoeInterface),
+			zap.String("ac_name", pppoeACName),
+		)
+	}
+
 	logger.Info("BNG started successfully",
 		zap.String("interface", iface),
 		zap.String("pool", poolNetwork),
 		zap.String("metrics", metricsAddr),
 		zap.Bool("dhcpv6_enabled", dhcpv6Server != nil),
 		zap.Bool("slaac_enabled", raServer != nil),
+		zap.Bool("pppoe_enabled", pppoeServer != nil),
 		zap.Bool("bgp_enabled", bgpController != nil),
 	)
 	logger.Info("Press Ctrl+C to stop")
@@ -1042,7 +1320,16 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			logger.Warn("Failed to stop SLAAC/RA daemon", zap.Error(err))
 		}
 	}
-	// Stop peer pool API server (Issue #77)
+	// Stop PPPoE server
+	if pppoeServer != nil {
+		if err := pppoeServer.Stop(); err != nil {
+			logger.Warn("Failed to stop PPPoE server", zap.Error(err))
+		}
+	}
+	// Stop peer pool health checks and API server (Issue #77)
+	if peerPool != nil {
+		peerPool.Stop()
+	}
 	if peerServer != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
@@ -1050,7 +1337,10 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			logger.Warn("Failed to stop peer pool API server", zap.Error(err))
 		}
 	}
-	// Stop HA syncer (Demo H)
+	// Stop HA failover controller and syncer (Demo H)
+	if haFailover != nil {
+		haFailover.Stop()
+	}
 	if haSyncer != nil {
 		if err := haSyncer.Stop(); err != nil {
 			logger.Warn("Failed to stop HA syncer", zap.Error(err))
@@ -1065,6 +1355,24 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if bgpController != nil {
 		if err := bgpController.Stop(); err != nil {
 			logger.Warn("Failed to stop BGP controller", zap.Error(err))
+		}
+	}
+	// Stop resilience manager
+	if resilienceManager != nil {
+		if err := resilienceManager.Stop(); err != nil {
+			logger.Warn("Failed to stop resilience manager", zap.Error(err))
+		}
+	}
+	// Stop anti-spoofing manager
+	if antispoofMgr != nil {
+		if err := antispoofMgr.Stop(); err != nil {
+			logger.Warn("Failed to stop anti-spoofing manager", zap.Error(err))
+		}
+	}
+	// Stop walled garden manager
+	if walledGardenMgr != nil {
+		if err := walledGardenMgr.Stop(); err != nil {
+			logger.Warn("Failed to stop walled garden manager", zap.Error(err))
 		}
 	}
 	logger.Info("BNG stopped")
@@ -1107,6 +1415,45 @@ func initLogger(level string) (*zap.Logger, error) {
 	config.Encoding = "json"
 
 	return config.Build()
+}
+
+// loadConfigFile reads a YAML config file and applies values to unset flags.
+// CLI flags take precedence over config file values.
+func loadConfigFile(cmd *cobra.Command, logger *zap.Logger) error {
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read config file %s: %w", configFile, err)
+	}
+
+	var cfg map[string]string
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("failed to parse config file %s: %w", configFile, err)
+	}
+
+	logger.Info("Loaded config file", zap.String("path", configFile), zap.Int("keys", len(cfg)))
+
+	for key, val := range cfg {
+		f := cmd.Flags().Lookup(key)
+		if f == nil {
+			logger.Warn("Unknown config key, skipping", zap.String("key", key))
+			continue
+		}
+		if cmd.Flags().Changed(key) {
+			continue
+		}
+		if err := cmd.Flags().Set(key, val); err != nil {
+			logger.Warn("Failed to set config value",
+				zap.String("key", key),
+				zap.String("value", val),
+				zap.Error(err),
+			)
+		}
+	}
+
+	return nil
 }
 
 func splitAndTrim(s string) []string {
@@ -1276,4 +1623,52 @@ func parseBGPNeighborEntry(entry string) (net.IP, uint32, error) {
 	}
 
 	return ip, asNum, nil
+}
+
+// bngHealthChecker implements resilience.HealthChecker for the BNG process.
+type bngHealthChecker struct {
+	nexusURL      string
+	radiusServers string
+	radiusEnabled bool
+}
+
+// CheckNexus checks connectivity to the Nexus server via HTTP GET /health.
+func (c *bngHealthChecker) CheckNexus(ctx context.Context) error {
+	if c.nexusURL == "" {
+		return nil // No Nexus configured, skip check
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", c.nexusURL+"/health", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("nexus health check returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// CheckRADIUS checks connectivity to the first RADIUS server via TCP dial.
+func (c *bngHealthChecker) CheckRADIUS(ctx context.Context) error {
+	if !c.radiusEnabled || c.radiusServers == "" {
+		return nil // RADIUS not configured, skip check
+	}
+	servers := splitAndTrim(c.radiusServers)
+	if len(servers) == 0 {
+		return nil
+	}
+	// Parse first server address
+	host, port := parseHostPort(servers[0], 1812)
+	addr := fmt.Sprintf("%s:%d", host, port)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("RADIUS TCP dial %s: %w", addr, err)
+	}
+	conn.Close()
+	return nil
 }

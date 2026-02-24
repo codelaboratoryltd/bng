@@ -38,6 +38,11 @@ type Server struct {
 	primaryDNS   net.IP
 	secondaryDNS net.IP
 
+	// PPP negotiation settings
+	authType       string        // "pap", "chap", or "both"
+	sessionTimeout time.Duration // Idle timeout
+	mru            uint16        // Maximum Receive Unit
+
 	// RADIUS client (optional)
 	radiusClient *radius.Client
 
@@ -126,6 +131,11 @@ type ServerConfig struct {
 	PoolGateway  string
 	PrimaryDNS   string
 	SecondaryDNS string
+
+	// PPP negotiation settings
+	AuthType       string        // "pap", "chap", or "both" (default: "pap")
+	SessionTimeout time.Duration // Idle timeout for sessions
+	MRU            uint16        // Maximum Receive Unit (default: 1492)
 }
 
 // NewServer creates a new PPPoE server
@@ -185,17 +195,30 @@ func newServerWithInterface(cfg ServerConfig, logger *zap.Logger, iface *net.Int
 		}
 	}
 
+	authType := cfg.AuthType
+	if authType == "" {
+		authType = "pap"
+	}
+
+	mru := cfg.MRU
+	if mru == 0 {
+		mru = 1492
+	}
+
 	return &Server{
-		iface:        cfg.Interface,
-		serverMAC:    iface.HardwareAddr,
-		acName:       acName,
-		serviceName:  serviceName,
-		logger:       logger,
-		sessions:     NewSessionManager(),
-		serverIP:     serverIP,
-		clientIPPool: pool,
-		primaryDNS:   net.ParseIP(cfg.PrimaryDNS),
-		secondaryDNS: net.ParseIP(cfg.SecondaryDNS),
+		iface:          cfg.Interface,
+		serverMAC:      iface.HardwareAddr,
+		acName:         acName,
+		serviceName:    serviceName,
+		authType:       authType,
+		sessionTimeout: cfg.SessionTimeout,
+		mru:            mru,
+		logger:         logger,
+		sessions:       NewSessionManager(),
+		serverIP:       serverIP,
+		clientIPPool:   pool,
+		primaryDNS:     net.ParseIP(cfg.PrimaryDNS),
+		secondaryDNS:   net.ParseIP(cfg.SecondaryDNS),
 	}, nil
 }
 
@@ -476,11 +499,23 @@ func (s *Server) handleSession(clientMAC net.HardwareAddr, data []byte) {
 
 // startLCPNegotiation initiates LCP negotiation
 func (s *Server) startLCPNegotiation(session *Session) {
+	// Encode MRU as big-endian uint16
+	mruBytes := []byte{byte(s.mru >> 8), byte(s.mru)}
+
+	// Determine auth protocol from config
+	var authProtoData []byte
+	switch s.authType {
+	case "chap":
+		authProtoData = []byte{0xC2, 0x23, 0x05} // CHAP with MD5
+	default:
+		authProtoData = []byte{0xC0, 0x23} // PAP
+	}
+
 	// Send Configure-Request
 	opts := []LCPOption{
-		{Type: LCPOptMRU, Data: []byte{0x05, 0xD4}}, // MRU 1492
+		{Type: LCPOptMRU, Data: mruBytes},
 		{Type: LCPOptMagicNumber, Data: magicToBytes(session.MagicNumber)},
-		{Type: LCPOptAuthProto, Data: []byte{0xC0, 0x23}}, // PAP
+		{Type: LCPOptAuthProto, Data: authProtoData},
 	}
 
 	pkt := &LCPPacket{
@@ -876,7 +911,11 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			removed := s.sessions.CleanupExpired(5 * time.Minute)
+			timeout := s.sessionTimeout
+			if timeout == 0 {
+				timeout = 5 * time.Minute
+			}
+			removed := s.sessions.CleanupExpired(timeout)
 			if removed > 0 {
 				s.logger.Info("Cleaned up expired PPPoE sessions",
 					zap.Int("count", removed),
