@@ -514,6 +514,14 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to add default pool: %w", err)
 	}
 
+	// Warn if lease mode is selected but no distributed backend is active
+	if poolMode == "lease" && nexusURL == "" && len(peerAddrs) == 0 && peerDiscovery != "dns" {
+		logger.Warn("pool-mode=lease requires Nexus or peer pool for epoch-based expiry; "+
+			"the default DHCP pool does not support epoch mode",
+			zap.String("pool_mode", poolMode),
+		)
+	}
+
 	// Create DHCP slow path server
 	dhcpServer, err := dhcp.NewServer(dhcp.ServerConfig{
 		Interface:         iface,

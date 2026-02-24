@@ -109,6 +109,7 @@ type DistributedConfig struct {
 	PrefixLen   int
 	Mode        PoolMode
 	EpochPeriod time.Duration // For lease mode (e.g., 1 hour)
+	EpochGrace  int           // Grace epochs before reclaiming IPs (default: 1)
 }
 
 // NewDistributedAllocator creates a new distributed allocator.
@@ -129,10 +130,14 @@ func NewDistributedAllocator(cfg DistributedConfig, store Store) (*DistributedAl
 	switch cfg.Mode {
 	case PoolModeLease:
 		// Use epoch bitmap allocator for lease mode (O(1) epoch advancement)
+		grace := uint64(cfg.EpochGrace)
+		if grace == 0 {
+			grace = 1 // Default: 1 epoch grace period
+		}
 		epochCfg := EpochBitmapConfig{
 			BaseNetwork:  cfg.BaseNetwork,
 			PrefixLength: cfg.PrefixLen,
-			GracePeriod:  1, // Default: 1 epoch grace period
+			GracePeriod:  grace,
 		}
 		epochAlloc, err := NewEpochBitmapAllocator(epochCfg)
 		if err != nil {
