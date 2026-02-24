@@ -19,6 +19,7 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/nat"
 	"github.com/codelaboratoryltd/bng/pkg/nexus"
 	"github.com/codelaboratoryltd/bng/pkg/pool"
+	"github.com/codelaboratoryltd/bng/pkg/pppoe"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
 	"github.com/codelaboratoryltd/bng/pkg/routing"
@@ -887,6 +888,52 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Initialize PPPoE server if enabled
+	var pppoeServer *pppoe.Server
+	if pppoeEnabled {
+		pppoeIface := pppoeInterface
+		if pppoeIface == "" {
+			pppoeIface = iface
+		}
+
+		// Parse DNS for PPPoE
+		pppoeDNS := splitAndTrim(poolDNS)
+		var primaryDNS, secondaryDNS string
+		if len(pppoeDNS) > 0 {
+			primaryDNS = pppoeDNS[0]
+		}
+		if len(pppoeDNS) > 1 {
+			secondaryDNS = pppoeDNS[1]
+		}
+
+		pppoeServer, err = pppoe.NewServer(pppoe.ServerConfig{
+			Interface:      pppoeIface,
+			ACName:         pppoeACName,
+			ServiceName:    pppoeServiceName,
+			ServerIP:       srvIP.String(),
+			ClientPool:     poolNetwork,
+			PoolGateway:    poolGateway,
+			PrimaryDNS:     primaryDNS,
+			SecondaryDNS:   secondaryDNS,
+			AuthType:       pppoeAuthType,
+			SessionTimeout: pppoeSessionTimeout,
+			MRU:            pppoeMRU,
+		}, logger)
+		if err != nil {
+			logger.Warn("Failed to create PPPoE server", zap.Error(err))
+		} else {
+			if radiusClient != nil {
+				pppoeServer.SetRADIUSClient(radiusClient)
+			}
+			logger.Info("PPPoE server configured",
+				zap.String("interface", pppoeIface),
+				zap.String("ac_name", pppoeACName),
+				zap.String("auth_type", pppoeAuthType),
+				zap.Uint16("mru", pppoeMRU),
+			)
+		}
+	}
+
 	// Initialize DHCPv6 server if enabled (Issue #26)
 	var dhcpv6Server *dhcpv6.Server
 	if dhcpv6Enabled {
@@ -1021,12 +1068,26 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Start PPPoE server if enabled
+	if pppoeServer != nil {
+		go func() {
+			if err := pppoeServer.Start(ctx); err != nil {
+				logger.Error("PPPoE server error", zap.Error(err))
+			}
+		}()
+		logger.Info("PPPoE server started",
+			zap.String("interface", pppoeInterface),
+			zap.String("ac_name", pppoeACName),
+		)
+	}
+
 	logger.Info("BNG started successfully",
 		zap.String("interface", iface),
 		zap.String("pool", poolNetwork),
 		zap.String("metrics", metricsAddr),
 		zap.Bool("dhcpv6_enabled", dhcpv6Server != nil),
 		zap.Bool("slaac_enabled", raServer != nil),
+		zap.Bool("pppoe_enabled", pppoeServer != nil),
 		zap.Bool("bgp_enabled", bgpController != nil),
 	)
 	logger.Info("Press Ctrl+C to stop")
@@ -1055,6 +1116,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if raServer != nil {
 		if err := raServer.Stop(); err != nil {
 			logger.Warn("Failed to stop SLAAC/RA daemon", zap.Error(err))
+		}
+	}
+	// Stop PPPoE server
+	if pppoeServer != nil {
+		if err := pppoeServer.Stop(); err != nil {
+			logger.Warn("Failed to stop PPPoE server", zap.Error(err))
 		}
 	}
 	// Stop peer pool API server (Issue #77)
