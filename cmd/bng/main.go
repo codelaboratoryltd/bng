@@ -27,6 +27,7 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/resilience"
 	"github.com/codelaboratoryltd/bng/pkg/routing"
 	"github.com/codelaboratoryltd/bng/pkg/slaac"
+	"github.com/codelaboratoryltd/bng/pkg/walledgarden"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"gopkg.in/yaml.v3"
@@ -185,6 +186,10 @@ var (
 
 	// Anti-spoofing configuration
 	antispoofMode string // Anti-spoofing mode: disabled, strict, loose, log-only
+
+	// Walled garden configuration
+	walledGardenEnabled bool   // Enable walled garden (captive portal)
+	walledGardenPortal  string // Portal address (IP:port)
 )
 
 func init() {
@@ -407,6 +412,12 @@ func init() {
 	runCmd.Flags().StringVar(&antispoofMode, "antispoof-mode", "disabled",
 		"Anti-spoofing mode: disabled, strict, loose, log-only")
 
+	// Walled garden flags
+	runCmd.Flags().BoolVar(&walledGardenEnabled, "walled-garden", false,
+		"Enable walled garden (captive portal redirect for unauthenticated subscribers)")
+	runCmd.Flags().StringVar(&walledGardenPortal, "walled-garden-portal", "10.255.255.1:8080",
+		"Walled garden portal address (IP:port)")
+
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(statsCmd)
@@ -523,6 +534,31 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 		logger.Info("Anti-spoofing manager started",
 			zap.String("mode", antispoofMode),
+			zap.String("interface", iface),
+		)
+	}
+
+	// Initialize walled garden manager if enabled
+	var walledGardenMgr *walledgarden.Manager
+	if walledGardenEnabled {
+		portalHost, portalPortStr := parseHostPort(walledGardenPortal, 8080)
+		portalIP := net.ParseIP(portalHost)
+		if portalIP == nil {
+			return fmt.Errorf("invalid --walled-garden-portal IP: %s", portalHost)
+		}
+
+		wgCfg := walledgarden.DefaultConfig()
+		wgCfg.Interface = iface
+		wgCfg.PortalIP = portalIP
+		wgCfg.PortalPort = uint16(portalPortStr)
+
+		walledGardenMgr = walledgarden.NewManager(wgCfg, logger)
+		if err := walledGardenMgr.Start(); err != nil {
+			return fmt.Errorf("failed to start walled garden manager: %w", err)
+		}
+		logger.Info("Walled garden manager started",
+			zap.String("portal_ip", portalIP.String()),
+			zap.Int("portal_port", portalPortStr),
 			zap.String("interface", iface),
 		)
 	}
@@ -1331,6 +1367,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if antispoofMgr != nil {
 		if err := antispoofMgr.Stop(); err != nil {
 			logger.Warn("Failed to stop anti-spoofing manager", zap.Error(err))
+		}
+	}
+	// Stop walled garden manager
+	if walledGardenMgr != nil {
+		if err := walledGardenMgr.Stop(); err != nil {
+			logger.Warn("Failed to stop walled garden manager", zap.Error(err))
 		}
 	}
 	logger.Info("BNG stopped")
