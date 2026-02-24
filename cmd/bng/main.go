@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/codelaboratoryltd/bng/pkg/deviceauth"
 	"github.com/codelaboratoryltd/bng/pkg/dhcp"
 	"github.com/codelaboratoryltd/bng/pkg/dhcpv6"
 	"github.com/codelaboratoryltd/bng/pkg/ebpf"
@@ -534,7 +535,7 @@ func runBNG(cmd *cobra.Command, args []string) error {
 
 	// Initialize Nexus HTTPAllocator if configured (Demo E - RADIUS-less mode)
 	if nexusURL != "" {
-		httpAllocator := nexus.NewHTTPAllocator(nexusURL)
+		httpAllocator := nexus.NewHTTPAllocator(nexusURL, nexusAllocatorOpts...)
 
 		// Verify connectivity to Nexus
 		if err := httpAllocator.HealthCheck(ctx); err != nil {
@@ -777,7 +778,40 @@ func runBNG(cmd *cobra.Command, args []string) error {
 
 	// Resolve auth PSK from file or direct flag
 	resolvedAuthPSK := resolveSecret(authPSK, authPSKFile, "auth-psk", "auth-psk-file", logger)
-	_ = resolvedAuthPSK // used when device auth is wired up
+
+	// Build device authenticator from flags
+	authCfg := deviceauth.Config{
+		Mode: deviceauth.AuthMode(authMode),
+	}
+	if authMode == "psk" && resolvedAuthPSK != "" {
+		authCfg.PSK = &deviceauth.PSKConfig{
+			Key: resolvedAuthPSK,
+		}
+	}
+	if authMode == "mtls" {
+		authCfg.MTLS = &deviceauth.MTLSConfig{
+			CertFile:           authMTLSCert,
+			KeyFile:            authMTLSKey,
+			CAFile:             authMTLSCA,
+			ServerName:         authMTLSServerName,
+			InsecureSkipVerify: authMTLSInsecure,
+		}
+	}
+
+	var nexusAllocatorOpts []nexus.HTTPAllocatorOption
+	if authMode != "none" && authMode != "" {
+		authenticator, authErr := deviceauth.NewAuthenticator(authCfg, logger)
+		if authErr != nil {
+			return fmt.Errorf("failed to create device authenticator: %w", authErr)
+		}
+		defer authenticator.Close()
+
+		authClient := deviceauth.NewAuthenticatedClient(authenticator)
+		nexusAllocatorOpts = append(nexusAllocatorOpts, nexus.WithHTTPClient(authClient))
+		logger.Info("Device authentication configured",
+			zap.String("mode", authMode),
+		)
+	}
 
 	// Initialize RADIUS client if enabled
 	var radiusClient *radius.Client

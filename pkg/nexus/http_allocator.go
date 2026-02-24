@@ -65,15 +65,30 @@ type PoolsListResponse struct {
 	Count int            `json:"count"`
 }
 
+// HTTPAllocatorOption configures the HTTPAllocator.
+type HTTPAllocatorOption func(*HTTPAllocator)
+
+// WithHTTPClient overrides the default HTTP client used for Nexus requests.
+// Use this to inject an authenticated client (e.g., with mTLS or PSK headers).
+func WithHTTPClient(client *http.Client) HTTPAllocatorOption {
+	return func(h *HTTPAllocator) {
+		h.httpClient = client
+	}
+}
+
 // NewHTTPAllocator creates a new HTTP-based IP allocator.
-func NewHTTPAllocator(nexusURL string) *HTTPAllocator {
-	return &HTTPAllocator{
+func NewHTTPAllocator(nexusURL string, opts ...HTTPAllocatorOption) *HTTPAllocator {
+	h := &HTTPAllocator{
 		baseURL: nexusURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 		pools: make(map[string]*PoolInfo),
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // AllocateIPv4 allocates an IPv4 address from the specified pool via Nexus API.
