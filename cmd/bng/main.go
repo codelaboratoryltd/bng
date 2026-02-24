@@ -23,6 +23,7 @@ import (
 	"github.com/codelaboratoryltd/bng/pkg/pppoe"
 	"github.com/codelaboratoryltd/bng/pkg/qos"
 	"github.com/codelaboratoryltd/bng/pkg/radius"
+	"github.com/codelaboratoryltd/bng/pkg/resilience"
 	"github.com/codelaboratoryltd/bng/pkg/routing"
 	"github.com/codelaboratoryltd/bng/pkg/slaac"
 	"github.com/spf13/cobra"
@@ -523,6 +524,43 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		)
 	}
 
+	// Resolve auth PSK from file or direct flag (needed before Nexus init)
+	resolvedAuthPSK := resolveSecret(authPSK, authPSKFile, "auth-psk", "auth-psk-file", logger)
+
+	// Build device authenticator from flags
+	authCfg := deviceauth.Config{
+		Mode: deviceauth.AuthMode(authMode),
+	}
+	if authMode == "psk" && resolvedAuthPSK != "" {
+		authCfg.PSK = &deviceauth.PSKConfig{
+			Key: resolvedAuthPSK,
+		}
+	}
+	if authMode == "mtls" {
+		authCfg.MTLS = &deviceauth.MTLSConfig{
+			CertFile:           authMTLSCert,
+			KeyFile:            authMTLSKey,
+			CAFile:             authMTLSCA,
+			ServerName:         authMTLSServerName,
+			InsecureSkipVerify: authMTLSInsecure,
+		}
+	}
+
+	var nexusAllocatorOpts []nexus.HTTPAllocatorOption
+	if authMode != "none" && authMode != "" {
+		authenticator, authErr := deviceauth.NewAuthenticator(authCfg, logger)
+		if authErr != nil {
+			return fmt.Errorf("failed to create device authenticator: %w", authErr)
+		}
+		defer authenticator.Close()
+
+		authClient := deviceauth.NewAuthenticatedClient(authenticator)
+		nexusAllocatorOpts = append(nexusAllocatorOpts, nexus.WithHTTPClient(authClient))
+		logger.Info("Device authentication configured",
+			zap.String("mode", authMode),
+		)
+	}
+
 	// Create DHCP slow path server
 	dhcpServer, err := dhcp.NewServer(dhcp.ServerConfig{
 		Interface:         iface,
@@ -776,43 +814,6 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	// Resolve RADIUS secret from file or direct flag
 	resolvedRadiusSecret := resolveSecret(radiusSecret, radiusSecretFile, "radius-secret", "radius-secret-file", logger)
 
-	// Resolve auth PSK from file or direct flag
-	resolvedAuthPSK := resolveSecret(authPSK, authPSKFile, "auth-psk", "auth-psk-file", logger)
-
-	// Build device authenticator from flags
-	authCfg := deviceauth.Config{
-		Mode: deviceauth.AuthMode(authMode),
-	}
-	if authMode == "psk" && resolvedAuthPSK != "" {
-		authCfg.PSK = &deviceauth.PSKConfig{
-			Key: resolvedAuthPSK,
-		}
-	}
-	if authMode == "mtls" {
-		authCfg.MTLS = &deviceauth.MTLSConfig{
-			CertFile:           authMTLSCert,
-			KeyFile:            authMTLSKey,
-			CAFile:             authMTLSCA,
-			ServerName:         authMTLSServerName,
-			InsecureSkipVerify: authMTLSInsecure,
-		}
-	}
-
-	var nexusAllocatorOpts []nexus.HTTPAllocatorOption
-	if authMode != "none" && authMode != "" {
-		authenticator, authErr := deviceauth.NewAuthenticator(authCfg, logger)
-		if authErr != nil {
-			return fmt.Errorf("failed to create device authenticator: %w", authErr)
-		}
-		defer authenticator.Close()
-
-		authClient := deviceauth.NewAuthenticatedClient(authenticator)
-		nexusAllocatorOpts = append(nexusAllocatorOpts, nexus.WithHTTPClient(authClient))
-		logger.Info("Device authentication configured",
-			zap.String("mode", authMode),
-		)
-	}
-
 	// Initialize RADIUS client if enabled
 	var radiusClient *radius.Client
 	var policyMgr *radius.PolicyManager
@@ -1050,6 +1051,37 @@ func runBNG(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Initialize resilience manager
+	var resilienceManager *resilience.Manager
+	{
+		resCfg := resilience.DefaultPartitionConfig()
+		resCfg.HealthCheckInterval = healthCheckInterval
+		resCfg.HealthCheckRetries = healthCheckRetries
+		resCfg.RADIUSPartitionMode = resilience.RADIUSPartitionMode(radiusPartitionMode)
+		resCfg.ShortLeaseEnabled = shortLeaseEnabled
+		resCfg.ShortLeaseThreshold = shortLeaseThreshold
+		resCfg.ShortLeaseDuration = shortLeaseDuration
+
+		hostname, _ := os.Hostname()
+		checker := &bngHealthChecker{
+			nexusURL:      nexusURL,
+			radiusServers: radiusServers,
+			radiusEnabled: radiusEnabled,
+		}
+		resilienceManager = resilience.NewManager(resCfg, hostname, checker, logger)
+		if err := resilienceManager.Start(); err != nil {
+			logger.Warn("Failed to start resilience manager", zap.Error(err))
+			resilienceManager = nil
+		} else {
+			logger.Info("Resilience manager started",
+				zap.Duration("health_check_interval", healthCheckInterval),
+				zap.Int("health_check_retries", healthCheckRetries),
+				zap.String("radius_partition_mode", radiusPartitionMode),
+				zap.Bool("short_lease_enabled", shortLeaseEnabled),
+			)
+		}
+	}
+
 	// Create and register metrics
 	metricsCollector := metrics.New(loader, poolMgr, dhcpServer, logger)
 	if err := metricsCollector.Register(); err != nil {
@@ -1189,6 +1221,12 @@ func runBNG(cmd *cobra.Command, args []string) error {
 	if bgpController != nil {
 		if err := bgpController.Stop(); err != nil {
 			logger.Warn("Failed to stop BGP controller", zap.Error(err))
+		}
+	}
+	// Stop resilience manager
+	if resilienceManager != nil {
+		if err := resilienceManager.Stop(); err != nil {
+			logger.Warn("Failed to stop resilience manager", zap.Error(err))
 		}
 	}
 	logger.Info("BNG stopped")
@@ -1439,4 +1477,52 @@ func parseBGPNeighborEntry(entry string) (net.IP, uint32, error) {
 	}
 
 	return ip, asNum, nil
+}
+
+// bngHealthChecker implements resilience.HealthChecker for the BNG process.
+type bngHealthChecker struct {
+	nexusURL      string
+	radiusServers string
+	radiusEnabled bool
+}
+
+// CheckNexus checks connectivity to the Nexus server via HTTP GET /health.
+func (c *bngHealthChecker) CheckNexus(ctx context.Context) error {
+	if c.nexusURL == "" {
+		return nil // No Nexus configured, skip check
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", c.nexusURL+"/health", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("nexus health check returned %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// CheckRADIUS checks connectivity to the first RADIUS server via TCP dial.
+func (c *bngHealthChecker) CheckRADIUS(ctx context.Context) error {
+	if !c.radiusEnabled || c.radiusServers == "" {
+		return nil // RADIUS not configured, skip check
+	}
+	servers := splitAndTrim(c.radiusServers)
+	if len(servers) == 0 {
+		return nil
+	}
+	// Parse first server address
+	host, port := parseHostPort(servers[0], 1812)
+	addr := fmt.Sprintf("%s:%d", host, port)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("RADIUS TCP dial %s: %w", addr, err)
+	}
+	conn.Close()
+	return nil
 }
