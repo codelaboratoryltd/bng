@@ -34,6 +34,20 @@ type PeerPool struct {
 	gateway     net.IP        // Pool gateway
 	dnsServers  []net.IP      // DNS servers
 	leaseTime   time.Duration // DHCP lease time
+
+	// Health checking
+	healthMu          sync.RWMutex
+	peerHealthMap     map[string]*peerHealth // nodeID -> health state
+	healthCancel      context.CancelFunc
+	healthInterval    time.Duration
+	healthThreshold   int // consecutive failures before marking unhealthy
+	healthCheckClient *http.Client
+}
+
+// peerHealth tracks health state for a single peer.
+type peerHealth struct {
+	healthy             bool
+	consecutiveFailures int
 }
 
 // LocalPool manages local IP allocations for subscribers owned by this node.
@@ -115,6 +129,12 @@ func NewPeerPool(cfg PeerPoolConfig) (*PeerPool, error) {
 		logger = zap.NewNop()
 	}
 
+	// Initialize peer health map — all peers start healthy.
+	healthMap := make(map[string]*peerHealth, len(allPeers))
+	for _, id := range allPeers {
+		healthMap[id] = &peerHealth{healthy: true}
+	}
+
 	pool := &PeerPool{
 		nodeID:      cfg.NodeID,
 		peers:       cfg.Peers,
@@ -126,6 +146,12 @@ func NewPeerPool(cfg PeerPoolConfig) (*PeerPool, error) {
 		listenAddr:  cfg.ListenAddr,
 		logger:      logger,
 		httpClient: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+		peerHealthMap:   healthMap,
+		healthInterval:  10 * time.Second,
+		healthThreshold: 3,
+		healthCheckClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
 	}
@@ -200,8 +226,9 @@ func (p *PeerPool) IsLocalOwner(subscriberID string) bool {
 // Allocate allocates an IP for a subscriber.
 // If this node owns the subscriber, allocates locally.
 // Otherwise, forwards the request to the owning peer.
+// Unhealthy peers are skipped — the next healthy peer in hash order is tried.
 func (p *PeerPool) Allocate(ctx context.Context, subscriberID string, mac net.HardwareAddr) (*AllocationResponse, error) {
-	owner := p.GetOwner(subscriberID)
+	owner := p.getHealthyOwner(subscriberID)
 
 	if owner == p.nodeID {
 		// We own this subscriber, allocate locally
@@ -210,6 +237,34 @@ func (p *PeerPool) Allocate(ctx context.Context, subscriberID string, mac net.Ha
 
 	// Forward to owning peer
 	return p.forwardAllocation(ctx, owner, subscriberID, mac)
+}
+
+// getHealthyOwner returns the highest-ranked healthy peer for a subscriber.
+// Falls back through the rendezvous hash ranking, skipping unhealthy peers.
+// If all remote peers are unhealthy, falls back to local allocation.
+func (p *PeerPool) getHealthyOwner(subscriberID string) string {
+	p.mu.RLock()
+	nodes := p.peerNodes
+	p.mu.RUnlock()
+
+	ranked := rendezvousRanked(subscriberID, nodes)
+
+	p.healthMu.RLock()
+	defer p.healthMu.RUnlock()
+
+	for _, node := range ranked {
+		// Local node is always considered healthy.
+		if node == p.nodeID {
+			return node
+		}
+		h, ok := p.peerHealthMap[node]
+		if !ok || h.healthy {
+			return node
+		}
+	}
+
+	// All remote peers unhealthy — fall back to local.
+	return p.nodeID
 }
 
 // allocateLocal allocates an IP from the local pool.
@@ -328,7 +383,7 @@ func (p *PeerPool) getPeerAddr(nodeID string) string {
 
 // Release releases an IP allocation.
 func (p *PeerPool) Release(ctx context.Context, subscriberID string) error {
-	owner := p.GetOwner(subscriberID)
+	owner := p.getHealthyOwner(subscriberID)
 
 	if owner == p.nodeID {
 		return p.releaseLocal(subscriberID)
@@ -462,6 +517,116 @@ func (p *PeerPool) RemovePeer(peerID string) {
 	p.logger.Info("Removed peer", zap.String("peer", peerID))
 }
 
+// --- Health checking ---
+
+// Start begins the background health check loop for remote peers.
+func (p *PeerPool) Start(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	p.healthCancel = cancel
+	go p.healthCheckLoop(ctx)
+	p.logger.Info("Peer health checking started",
+		zap.Duration("interval", p.healthInterval),
+		zap.Int("threshold", p.healthThreshold),
+	)
+}
+
+// Stop stops the background health check loop.
+func (p *PeerPool) Stop() {
+	if p.healthCancel != nil {
+		p.healthCancel()
+	}
+}
+
+// healthCheckLoop periodically checks the health of all remote peers.
+func (p *PeerPool) healthCheckLoop(ctx context.Context) {
+	ticker := time.NewTicker(p.healthInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.mu.RLock()
+			nodes := make([]string, len(p.peerNodes))
+			copy(nodes, p.peerNodes)
+			p.mu.RUnlock()
+
+			for _, nodeID := range nodes {
+				if nodeID == p.nodeID {
+					continue // Skip self
+				}
+				p.checkPeer(ctx, nodeID)
+			}
+		}
+	}
+}
+
+// checkPeer performs a health check against a single peer and updates its state.
+func (p *PeerPool) checkPeer(ctx context.Context, nodeID string) {
+	peerAddr := p.getPeerAddr(nodeID)
+	if peerAddr == "" {
+		return
+	}
+
+	url := fmt.Sprintf("http://%s/pool/status", peerAddr)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return
+	}
+
+	resp, err := p.healthCheckClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+
+	healthy := err == nil && resp.StatusCode == http.StatusOK
+
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+
+	h, ok := p.peerHealthMap[nodeID]
+	if !ok {
+		h = &peerHealth{healthy: true}
+		p.peerHealthMap[nodeID] = h
+	}
+
+	if healthy {
+		if !h.healthy {
+			p.logger.Info("Peer recovered",
+				zap.String("peer", nodeID),
+				zap.Int("previous_failures", h.consecutiveFailures),
+			)
+		}
+		h.consecutiveFailures = 0
+		h.healthy = true
+		return
+	}
+
+	h.consecutiveFailures++
+	if h.healthy && h.consecutiveFailures >= p.healthThreshold {
+		h.healthy = false
+		p.logger.Warn("Peer marked unhealthy",
+			zap.String("peer", nodeID),
+			zap.Int("consecutive_failures", h.consecutiveFailures),
+		)
+	}
+}
+
+// IsPeerHealthy returns whether a given peer is considered healthy.
+func (p *PeerPool) IsPeerHealthy(nodeID string) bool {
+	if nodeID == p.nodeID {
+		return true
+	}
+	p.healthMu.RLock()
+	defer p.healthMu.RUnlock()
+	h, ok := p.peerHealthMap[nodeID]
+	if !ok {
+		return true // Unknown peers assumed healthy
+	}
+	return h.healthy
+}
+
 // --- HTTP API for peer communication ---
 
 // RegisterHandlers registers the peer pool HTTP handlers.
@@ -577,6 +742,35 @@ func rendezvousHash(key string, nodes []string) string {
 	}
 
 	return bestNode
+}
+
+// rendezvousRanked returns all nodes ranked by hash score (highest first).
+// Used for fallback when the primary owner is unhealthy.
+func rendezvousRanked(key string, nodes []string) []string {
+	if len(nodes) <= 1 {
+		return nodes
+	}
+
+	type scored struct {
+		node  string
+		score uint64
+	}
+
+	keyHash := hashString(key)
+	scores := make([]scored, len(nodes))
+	for i, node := range nodes {
+		scores[i] = scored{node: node, score: hashCombine(keyHash, node)}
+	}
+
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].score > scores[j].score
+	})
+
+	ranked := make([]string, len(scores))
+	for i, s := range scores {
+		ranked[i] = s.node
+	}
+	return ranked
 }
 
 // hashString converts a string to uint64 using FNV-1a.

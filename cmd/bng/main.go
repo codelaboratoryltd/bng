@@ -673,6 +673,9 @@ func runBNG(cmd *cobra.Command, args []string) error {
 				logger.Error("Peer pool API server error", zap.Error(err))
 			}
 		}()
+
+		// Start peer health checking
+		peerPool.Start(ctx)
 	}
 
 	// Initialize HA Syncer if configured (Demo H - active/standby with P2P sync)
@@ -1246,7 +1249,10 @@ func runBNG(cmd *cobra.Command, args []string) error {
 			logger.Warn("Failed to stop PPPoE server", zap.Error(err))
 		}
 	}
-	// Stop peer pool API server (Issue #77)
+	// Stop peer pool health checks and API server (Issue #77)
+	if peerPool != nil {
+		peerPool.Stop()
+	}
 	if peerServer != nil {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
