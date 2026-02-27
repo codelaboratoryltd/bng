@@ -1147,10 +1147,12 @@ func (s *Server) cleanupExpiredLeases() {
 		}
 
 		// Remove from fast path cache
-		hwAddr, _ := net.ParseMAC(mac)
-		if hwAddr != nil {
-			macU64 := ebpf.MACToUint64(hwAddr)
-			s.loader.RemoveSubscriber(macU64)
+		if s.loader != nil {
+			hwAddr, _ := net.ParseMAC(mac)
+			if hwAddr != nil {
+				macU64 := ebpf.MACToUint64(hwAddr)
+				s.loader.RemoveSubscriber(macU64)
+			}
 		}
 	}
 	s.leasesMu.Unlock()
