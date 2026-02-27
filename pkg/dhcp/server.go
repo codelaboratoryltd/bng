@@ -34,6 +34,10 @@ type Server struct {
 	leases   map[string]*Lease // MAC -> Lease
 	leasesMu sync.RWMutex
 
+	// Relay support: secondary index for circuit-ID based lookup
+	leasesByCircuitID   map[string]*Lease // hex(CircuitID) -> Lease
+	leasesByCircuitIDMu sync.RWMutex
+
 	// RADIUS integration (optional)
 	radiusClient *radius.Client
 	policyMgr    *radius.PolicyManager
@@ -127,6 +131,7 @@ func NewServer(cfg ServerConfig, loader *ebpf.Loader, poolMgr *PoolManager, logg
 		loader:            loader,
 		poolMgr:           poolMgr,
 		leases:            make(map[string]*Lease),
+		leasesByCircuitID: make(map[string]*Lease),
 		radiusAuthEnabled: cfg.RADIUSAuthEnabled,
 	}, nil
 }
@@ -300,6 +305,9 @@ func (s *Server) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCP
 	mac := req.ClientHWAddr.String()
 	msgType := req.MessageType()
 
+	// Detect relayed packets: giaddr != 0.0.0.0 means a relay agent forwarded this
+	isRelayed := !req.GatewayIPAddr.IsUnspecified() && !req.GatewayIPAddr.Equal(net.IPv4zero)
+
 	// Parse Option 82 if present (Issue #15)
 	opt82 := parseOption82(req)
 	if opt82 != nil {
@@ -309,12 +317,15 @@ func (s *Server) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCP
 			zap.String("xid", fmt.Sprintf("%08x", req.TransactionID)),
 			zap.String("circuit_id", string(opt82.CircuitID)),
 			zap.String("remote_id", string(opt82.RemoteID)),
+			zap.Bool("relayed", isRelayed),
+			zap.String("giaddr", req.GatewayIPAddr.String()),
 		)
 	} else {
 		s.logger.Debug("DHCP request received (slow path)",
 			zap.String("mac", mac),
 			zap.String("type", msgType.String()),
 			zap.String("xid", fmt.Sprintf("%08x", req.TransactionID)),
+			zap.Bool("relayed", isRelayed),
 		)
 	}
 
@@ -354,24 +365,53 @@ func (s *Server) handleDHCP(conn net.PacketConn, peer net.Addr, req *dhcpv4.DHCP
 		return
 	}
 
-	// Send response
-	if _, err := conn.WriteTo(resp.ToBytes(), peer); err != nil {
+	// Send response: unicast to relay agent if relayed, otherwise to peer
+	var dest net.Addr
+	if isRelayed {
+		dest = &net.UDPAddr{IP: req.GatewayIPAddr, Port: 67}
+	} else {
+		dest = peer
+	}
+
+	if _, err := conn.WriteTo(resp.ToBytes(), dest); err != nil {
 		s.logger.Error("Failed to send DHCP response",
 			zap.String("mac", mac),
+			zap.String("dest", dest.String()),
 			zap.Error(err),
 		)
 	}
+}
+
+// lookupLeaseByCircuitID returns an existing lease indexed by circuit-ID, if any.
+func (s *Server) lookupLeaseByCircuitID(circuitID []byte) *Lease {
+	if len(circuitID) == 0 {
+		return nil
+	}
+	key := hex.EncodeToString(circuitID)
+	s.leasesByCircuitIDMu.RLock()
+	lease := s.leasesByCircuitID[key]
+	s.leasesByCircuitIDMu.RUnlock()
+	return lease
 }
 
 // handleDiscover handles DHCP DISCOVER - allocates new IP
 func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	mac := req.ClientHWAddr
 	macStr := mac.String()
+	isRelayed := !req.GatewayIPAddr.IsUnspecified() && !req.GatewayIPAddr.Equal(net.IPv4zero)
 
 	// Check if client already has a lease
+	// For relayed packets with circuit-ID, also check circuit-ID index
 	s.leasesMu.RLock()
 	existingLease := s.leases[macStr]
 	s.leasesMu.RUnlock()
+
+	if existingLease == nil && isRelayed {
+		opt82 := parseOption82(req)
+		if opt82 != nil && len(opt82.CircuitID) > 0 {
+			existingLease = s.lookupLeaseByCircuitID(opt82.CircuitID)
+		}
+	}
 
 	var ip net.IP
 	var poolID uint32
@@ -516,6 +556,7 @@ func (s *Server) handleDiscover(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	mac := req.ClientHWAddr
 	ctx := context.Background()
+	isRelayed := !req.GatewayIPAddr.IsUnspecified() && !req.GatewayIPAddr.Equal(net.IPv4zero)
 
 	// Get requested IP
 	requestedIP := req.RequestedIPAddress()
@@ -524,9 +565,17 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	}
 
 	// Verify we offered this IP or it's a renewal
+	// For relayed packets with circuit-ID, also check circuit-ID index
 	s.leasesMu.RLock()
 	existingLease := s.leases[mac.String()]
 	s.leasesMu.RUnlock()
+
+	if existingLease == nil && isRelayed {
+		opt82 := parseOption82(req)
+		if opt82 != nil && len(opt82.CircuitID) > 0 {
+			existingLease = s.lookupLeaseByCircuitID(opt82.CircuitID)
+		}
+	}
 
 	var pool *Pool
 	var poolID uint32
@@ -646,6 +695,14 @@ func (s *Server) handleRequest(req *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4, error) {
 	s.leasesMu.Lock()
 	s.leases[mac.String()] = lease
 	s.leasesMu.Unlock()
+
+	// Maintain circuit-ID secondary index for relay-aware lookup
+	if len(lease.CircuitID) > 0 {
+		cidKey := hex.EncodeToString(lease.CircuitID)
+		s.leasesByCircuitIDMu.Lock()
+		s.leasesByCircuitID[cidKey] = lease
+		s.leasesByCircuitIDMu.Unlock()
+	}
 
 	// Update eBPF fast path cache
 	if err := s.updateFastPathCache(mac, lease, pool); err != nil {
@@ -813,6 +870,14 @@ func (s *Server) handleRelease(req *dhcpv4.DHCPv4) {
 		delete(s.leases, mac.String())
 	}
 	s.leasesMu.Unlock()
+
+	// Remove from circuit-ID secondary index
+	if exists && len(lease.CircuitID) > 0 {
+		cidKey := hex.EncodeToString(lease.CircuitID)
+		s.leasesByCircuitIDMu.Lock()
+		delete(s.leasesByCircuitID, cidKey)
+		s.leasesByCircuitIDMu.Unlock()
+	}
 
 	if exists {
 		// Send RADIUS Accounting-Stop
@@ -1067,6 +1132,14 @@ func (s *Server) cleanupExpiredLeases() {
 	for _, mac := range expired {
 		lease := s.leases[mac]
 		delete(s.leases, mac)
+
+		// Remove from circuit-ID secondary index
+		if len(lease.CircuitID) > 0 {
+			cidKey := hex.EncodeToString(lease.CircuitID)
+			s.leasesByCircuitIDMu.Lock()
+			delete(s.leasesByCircuitID, cidKey)
+			s.leasesByCircuitIDMu.Unlock()
+		}
 
 		// Release IP back to pool
 		if pool := s.poolMgr.GetPool(lease.PoolID); pool != nil {
