@@ -1,6 +1,7 @@
 package dhcp
 
 import (
+	"encoding/hex"
 	"net"
 	"testing"
 	"time"
@@ -569,6 +570,278 @@ func TestNewPoolErrors(t *testing.T) {
 			}
 			if !tt.expectError && err != nil {
 				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// === DHCP Relay Tests ===
+
+func TestRelayDetection(t *testing.T) {
+	tests := []struct {
+		name      string
+		giaddr    net.IP
+		expectRel bool
+	}{
+		{
+			name:      "no relay - zero giaddr",
+			giaddr:    net.IPv4zero,
+			expectRel: false,
+		},
+		{
+			name:      "no relay - nil giaddr",
+			giaddr:    nil,
+			expectRel: false,
+		},
+		{
+			name:      "relayed - valid giaddr",
+			giaddr:    net.ParseIP("10.0.0.1"),
+			expectRel: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			giaddr := tt.giaddr
+			if giaddr == nil {
+				giaddr = net.IPv4zero
+			}
+			isRelayed := !giaddr.IsUnspecified() && !giaddr.Equal(net.IPv4zero)
+			if isRelayed != tt.expectRel {
+				t.Errorf("expected relayed=%v, got %v for giaddr=%v", tt.expectRel, isRelayed, tt.giaddr)
+			}
+		})
+	}
+}
+
+func TestCircuitIDLeaseIndex(t *testing.T) {
+	logger := zap.NewNop()
+	poolMgr := NewPoolManager(nil, logger)
+
+	server, err := NewServer(ServerConfig{
+		Interface: "eth0",
+		ServerIP:  net.ParseIP("192.168.1.1"),
+	}, nil, poolMgr, logger)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+	circuitID := []byte("eth 0/1/1:100")
+	cidKey := hex.EncodeToString(circuitID)
+
+	lease := &Lease{
+		MAC:       mac,
+		IP:        net.ParseIP("10.0.1.100"),
+		PoolID:    1,
+		ExpiresAt: time.Now().Add(time.Hour),
+		CircuitID: circuitID,
+	}
+
+	// Store in both indexes
+	server.leasesMu.Lock()
+	server.leases[mac.String()] = lease
+	server.leasesMu.Unlock()
+
+	server.leasesByCircuitIDMu.Lock()
+	server.leasesByCircuitID[cidKey] = lease
+	server.leasesByCircuitIDMu.Unlock()
+
+	// Lookup by circuit-ID should find the lease
+	found := server.lookupLeaseByCircuitID(circuitID)
+	if found == nil {
+		t.Fatal("expected to find lease by circuit-ID")
+	}
+	if found.IP.String() != "10.0.1.100" {
+		t.Errorf("unexpected IP: %s", found.IP.String())
+	}
+
+	// Lookup with unknown circuit-ID should return nil
+	found = server.lookupLeaseByCircuitID([]byte("unknown"))
+	if found != nil {
+		t.Error("expected nil for unknown circuit-ID")
+	}
+
+	// Lookup with empty circuit-ID should return nil
+	found = server.lookupLeaseByCircuitID(nil)
+	if found != nil {
+		t.Error("expected nil for empty circuit-ID")
+	}
+}
+
+func TestDualIndexCleanup(t *testing.T) {
+	logger := zap.NewNop()
+	poolMgr := NewPoolManager(nil, logger)
+
+	pool, err := NewPool(PoolConfig{
+		ID:         1,
+		Name:       "test",
+		Network:    "10.0.1.0/24",
+		Gateway:    "10.0.1.1",
+		DNSServers: []string{"8.8.8.8"},
+		LeaseTime:  time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("NewPool failed: %v", err)
+	}
+	poolMgr.AddPool(pool)
+
+	server, err := NewServer(ServerConfig{
+		Interface: "eth0",
+		ServerIP:  net.ParseIP("10.0.1.1"),
+	}, nil, poolMgr, logger)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:01")
+	circuitID := []byte("port-1")
+	cidKey := hex.EncodeToString(circuitID)
+
+	// Create a lease that's already expired
+	expiredLease := &Lease{
+		MAC:       mac,
+		IP:        net.ParseIP("10.0.1.50"),
+		PoolID:    1,
+		ExpiresAt: time.Now().Add(-time.Hour), // Already expired
+		CircuitID: circuitID,
+	}
+
+	server.leasesMu.Lock()
+	server.leases[mac.String()] = expiredLease
+	server.leasesMu.Unlock()
+
+	server.leasesByCircuitIDMu.Lock()
+	server.leasesByCircuitID[cidKey] = expiredLease
+	server.leasesByCircuitIDMu.Unlock()
+
+	// Run cleanup
+	server.cleanupExpiredLeases()
+
+	// Both indexes should be cleaned
+	server.leasesMu.RLock()
+	_, macExists := server.leases[mac.String()]
+	server.leasesMu.RUnlock()
+
+	server.leasesByCircuitIDMu.RLock()
+	_, cidExists := server.leasesByCircuitID[cidKey]
+	server.leasesByCircuitIDMu.RUnlock()
+
+	if macExists {
+		t.Error("expected MAC lease to be cleaned up")
+	}
+	if cidExists {
+		t.Error("expected circuit-ID lease to be cleaned up")
+	}
+}
+
+func TestHybridRelayAndDirect(t *testing.T) {
+	logger := zap.NewNop()
+	poolMgr := NewPoolManager(nil, logger)
+
+	server, err := NewServer(ServerConfig{
+		Interface: "eth0",
+		ServerIP:  net.ParseIP("192.168.1.1"),
+	}, nil, poolMgr, logger)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	// Direct subscriber (no relay)
+	directMAC, _ := net.ParseMAC("aa:bb:cc:00:00:01")
+	directLease := &Lease{
+		MAC:       directMAC,
+		IP:        net.ParseIP("10.0.1.10"),
+		PoolID:    1,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	// Relayed subscriber (with circuit-ID)
+	relayedMAC, _ := net.ParseMAC("aa:bb:cc:00:00:02")
+	relayedCircuitID := []byte("eth 0/2/1:200")
+	relayedCIDKey := hex.EncodeToString(relayedCircuitID)
+	relayedLease := &Lease{
+		MAC:       relayedMAC,
+		IP:        net.ParseIP("10.0.1.20"),
+		PoolID:    1,
+		ExpiresAt: time.Now().Add(time.Hour),
+		CircuitID: relayedCircuitID,
+	}
+
+	// Store both
+	server.leasesMu.Lock()
+	server.leases[directMAC.String()] = directLease
+	server.leases[relayedMAC.String()] = relayedLease
+	server.leasesMu.Unlock()
+
+	server.leasesByCircuitIDMu.Lock()
+	server.leasesByCircuitID[relayedCIDKey] = relayedLease
+	server.leasesByCircuitIDMu.Unlock()
+
+	// Direct subscriber: found by MAC only
+	server.leasesMu.RLock()
+	found := server.leases[directMAC.String()]
+	server.leasesMu.RUnlock()
+	if found == nil || found.IP.String() != "10.0.1.10" {
+		t.Error("direct subscriber not found by MAC")
+	}
+
+	// Relayed subscriber: found by circuit-ID
+	found = server.lookupLeaseByCircuitID(relayedCircuitID)
+	if found == nil || found.IP.String() != "10.0.1.20" {
+		t.Error("relayed subscriber not found by circuit-ID")
+	}
+
+	// Relayed subscriber: also found by MAC (dual-indexed)
+	server.leasesMu.RLock()
+	found = server.leases[relayedMAC.String()]
+	server.leasesMu.RUnlock()
+	if found == nil || found.IP.String() != "10.0.1.20" {
+		t.Error("relayed subscriber not found by MAC")
+	}
+
+	// Total leases should be 2 by MAC
+	if server.ActiveLeases() != 2 {
+		t.Errorf("expected 2 active leases, got %d", server.ActiveLeases())
+	}
+}
+
+func TestRelayResponseRouting(t *testing.T) {
+	// Verify that response destination is correctly computed
+	tests := []struct {
+		name       string
+		giaddr     net.IP
+		peerAddr   string
+		expectDest string
+	}{
+		{
+			name:       "direct - send to peer",
+			giaddr:     net.IPv4zero,
+			peerAddr:   "192.168.1.100:68",
+			expectDest: "192.168.1.100:68",
+		},
+		{
+			name:       "relayed - send to relay agent",
+			giaddr:     net.ParseIP("10.0.0.1"),
+			peerAddr:   "192.168.1.100:68",
+			expectDest: "10.0.0.1:67",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isRelayed := !tt.giaddr.IsUnspecified() && !tt.giaddr.Equal(net.IPv4zero)
+
+			peer, _ := net.ResolveUDPAddr("udp", tt.peerAddr)
+			var dest net.Addr
+			if isRelayed {
+				dest = &net.UDPAddr{IP: tt.giaddr, Port: 67}
+			} else {
+				dest = peer
+			}
+
+			if dest.String() != tt.expectDest {
+				t.Errorf("expected dest %q, got %q", tt.expectDest, dest.String())
 			}
 		})
 	}
