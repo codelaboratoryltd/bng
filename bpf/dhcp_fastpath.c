@@ -717,22 +717,43 @@ int dhcp_fastpath_prog(struct xdp_md *ctx) {
 
 	/* === Build DHCP Reply === */
 
-	/* Set up L2 headers for reply (Issue #17) */
-	setup_reply_l2_headers(&pkt, config);
+	/* Check if packet was relayed (giaddr != 0) */
+	__u32 giaddr = pkt.dhcp->giaddr;
 
 	/* Server IP - use config if set, otherwise pool gateway */
 	__u32 server_ip = (config->server_ip != 0) ? config->server_ip : pool->gateway;
 
-	/* Build IP header for reply */
-	pkt.ip->saddr = server_ip;
-	pkt.ip->daddr = 0xFFFFFFFF;  /* Broadcast at IP layer */
-	pkt.ip->ttl = 64;
-	pkt.ip->check = 0;
+	if (giaddr != 0) {
+		/* Relayed packet: unicast reply to relay agent */
+		/* L2: dest MAC = relay agent's MAC (the packet's source MAC) */
+		copy_mac(pkt.eth->h_dest, pkt.eth->h_source);
+		copy_mac(pkt.eth->h_source, config->server_mac);
 
-	/* Swap UDP ports */
-	pkt.udp->source = bpf_htons(DHCP_SERVER_PORT);
-	pkt.udp->dest = bpf_htons(DHCP_CLIENT_PORT);
-	pkt.udp->check = 0;  /* UDP checksum optional for IPv4 */
+		/* L3: unicast to relay agent IP */
+		pkt.ip->saddr = server_ip;
+		pkt.ip->daddr = giaddr;
+		pkt.ip->ttl = 64;
+		pkt.ip->check = 0;
+
+		/* L4: server port -> server port (relay listens on 67) */
+		pkt.udp->source = bpf_htons(DHCP_SERVER_PORT);
+		pkt.udp->dest = bpf_htons(DHCP_SERVER_PORT);
+		pkt.udp->check = 0;
+
+		update_stat(STAT_UNICAST_REPLY);
+	} else {
+		/* Direct packet: broadcast reply (existing behavior) */
+		setup_reply_l2_headers(&pkt, config);
+
+		pkt.ip->saddr = server_ip;
+		pkt.ip->daddr = 0xFFFFFFFF;  /* Broadcast at IP layer */
+		pkt.ip->ttl = 64;
+		pkt.ip->check = 0;
+
+		pkt.udp->source = bpf_htons(DHCP_SERVER_PORT);
+		pkt.udp->dest = bpf_htons(DHCP_CLIENT_PORT);
+		pkt.udp->check = 0;
+	}
 
 	/* Build DHCP reply */
 	pkt.dhcp->op = BOOTREPLY;
